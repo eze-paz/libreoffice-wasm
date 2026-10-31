@@ -1,0 +1,11 @@
+--disable-debug
+--enable-sal-log
+--disable-crashdump
+--host=wasm32-local-emscripten
+--disable-gui
+--with-package-format=emscripten
+--without-java
+--without-junit
+--disable-cve-tests
+--with-parallelism=10
+--with-wasm-module=calc writer impress

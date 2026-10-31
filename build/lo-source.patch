@@ -1,0 +1,16 @@
+diff --git a/comphelper/source/crypto/Crypto_OpenSSL.cxx b/comphelper/source/crypto/Crypto_OpenSSL.cxx
+index ae78b4a81..ea41e095f 100644
+--- a/comphelper/source/crypto/Crypto_OpenSSL.cxx
++++ b/comphelper/source/crypto/Crypto_OpenSSL.cxx
+@@ -85,9 +85,10 @@ public:
+         EVP_CIPHER_CTX_set_padding(mpContext.get(), 0);
+     }
+ 
+-    void setupDecryptContext(const std::vector<sal_uInt8>& key, const std::vector<sal_uInt8>& iv,
++    void setupDecryptContext(const std::vector<sal_uInt8>& rKey, const std::vector<sal_uInt8>& rIV,
+                              CryptoType eType) override
+     {
++        std::vector<sal_uInt8> key(rKey), iv(rIV);
+         mpContext.reset(EVP_CIPHER_CTX_new());
+         EVP_CIPHER_CTX_init(mpContext.get());
+ 

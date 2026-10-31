@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LibreOffice in the browser</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fff; --mut: #6e6e73; --line: #d2d2d7; --acc: #0a66c2; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --bg: #161617; --mut: #a1a1a6; --line: #3a3a3c; --acc: #4c9be8; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p { color: var(--mut); margin: 0 0 20px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+  input[type=text] { width: 7em; }
+  input, button { font: inherit; }
+  button { background: var(--acc); color: #fff; border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #out a { display: block; color: var(--acc); }
+  pre { color: var(--mut); font-size: 12px; white-space: pre-wrap; border-top: 1px solid var(--line); padding-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LibreOffice in the browser</h1>
+  <p>Real LibreOffice (Writer, Calc, Impress) compiled to WebAssembly, running on this page with no cross-origin isolation. Your files never leave the browser.</p>
+  <div class="row">
+    <input type="file" id="files" multiple>
+    <label>to <input type="text" id="to" value="pdf" list="fmts"></label>
+    <datalist id="fmts"><option>pdf</option><option>docx</option><option>odt</option><option>xlsx</option><option>ods</option><option>csv</option><option>pptx</option><option>odp</option><option>png</option><option>html</option><option>txt</option></datalist>
+    <button id="go">Convert</button>
+  </div>
+  <div id="out"></div>
+  <pre id="log"></pre>
+</main>
+<script type="module">
+  import { run } from './libreoffice.js';
+  const $ = (id) => document.getElementById(id);
+  if (typeof WebAssembly.Suspending !== 'function') $('log').textContent = 'This browser has no WebAssembly JSPI, which the engine needs (Chrome or Edge 137+).';
+  $('go').onclick = async () => {
+    const picked = [...$('files').files];
+    if (!picked.length) return;
+    $('go').disabled = true; $('out').textContent = ''; $('log').textContent = 'Converting (the first run downloads ~80 MB)...';
+    const t0 = performance.now();
+    try {
+      const files = await Promise.all(picked.map(async (f) => ({ name: f.name.replace(/[^A-Za-z0-9._-]/g, '_'), bytes: await f.arrayBuffer() })));
+      const r = await run(['--headless', '--norestore', '--convert-to', $('to').value.trim(), '--outdir', '/tmp/out', ...files.map((f) => '/tmp/in/' + f.name)], files);
+      for (const f of r.files) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([f.bytes])); a.download = f.name; a.textContent = f.name + ' (' + Math.round(f.bytes.byteLength / 1024) + ' KB)';
+        $('out').appendChild(a);
+      }
+      $('log').textContent = (r.files.length ? '' : 'No output.\n') + ((performance.now() - t0) / 1000).toFixed(1) + ' s\n' + r.log.join('\n');
+    } catch (e) {
+      $('log').textContent = String(e && e.message || e);
+    }
+    $('go').disabled = false;
+  };
+</script>
+</body>
+</html>

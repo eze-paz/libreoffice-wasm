@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>libreoffice-wasm engine</title>
+<!-- One LibreOffice command line (soffice --headless ...) per page load. Load it in a hidden
+     same-origin iframe, one iframe per job (libreoffice.js does this). The binaries in bin/
+     run with cooperative threads (coop.js), so the page does NOT need to be cross-origin
+     isolated (no COOP/COEP headers); it works the same on an isolated page.
+     postMessage protocol with the parent:
+       engine → parent:  {type:'lo-ready'}
+       parent → engine:  {type:'lo-run', id, args:[...], files:[{name, bytes:ArrayBuffer}],
+                          fonts?:[{name, bytes:ArrayBuffer}]}
+                         files land in /tmp/in/<name>; args are soffice's own command line,
+                         with input files named /tmp/in/<name> and output going to /tmp/out;
+                         fonts (.ttf/.otf/.ttc) are added to LibreOffice's font folder
+       engine → parent:  {type:'lo-done', id, code, files:[{name, bytes}], log:[...]}
+                         every file under /tmp/out, plus what soffice printed
+     Query: ?v=<binaries version> is appended to every bin/ URL (cache busting).
+     soffice's CLI never exits here (its event loop keeps the runtime alive), so the job is
+     done when every input has printed its "convert ... -> <target>" or "Error:" line and
+     every target is written and closed. -->
+</head>
+<body>
+<canvas id="qtcanvas" style="display:none"></canvas>
+<script src="coop.js"></script>
+<script>
+(function () {
+  'use strict';
+  const BIN = 'bin/';
+  const V = new URLSearchParams(location.search).get('v') || '1';
+  const post = (msg, transfer) => parent.postMessage(msg, '*', transfer || []);
+  const log = window.__loLog = [];
+  let job = null, done = false;
+  const targets = []; let errors = 0, settledChecks = 0;
+  function onLine(t) {
+    log.push(t);
+    const m = /^convert .* -> (\/tmp\/out\/.+?) using filter\b/.exec(t);
+    if (m) targets.push(m[1]);
+    else if (/^Error:/.test(t)) {
+      errors++;
+      // a failed store names its target: that input is accounted for by the error, not a file
+      const i = targets.findIndex((p) => t.includes('file://' + p));
+      if (i >= 0) targets.splice(i, 1);
+    }
+  }
+  // Every input accounted for, every target on disk, nothing open under /tmp/out, twice in a row.
+  function checkDone() {
+    if (done || !job) return;
+    const FS = window.FS;
+    if (!FS) return;   // runtime not up yet
+    let quiet = false;
+    try {
+      const want = (job.files || []).length || 1;
+      const open = (FS.streams || []).some((s) => s && typeof s.path === 'string' && s.path.startsWith('/tmp/out'));
+      const written = targets.every((p) => { try { return FS.stat(p).size > 0; } catch (_) { return false; } });
+      quiet = targets.length + errors >= want && written && !open;
+    } catch (_) {}
+    settledChecks = quiet ? settledChecks + 1 : 0;
+    if (settledChecks >= 2) finish(0);
+    window.__loState = { targets, errors, settledChecks, quiet };   // for debugging
+  }
+
+  function listOut(FS, dir, pre, acc) {
+    for (const n of FS.readdir(dir)) {
+      if (n === '.' || n === '..') continue;
+      const p = dir + '/' + n, st = FS.stat(p);
+      if (FS.isDir(st.mode)) listOut(FS, p, pre + n + '/', acc);
+      else { const d = FS.readFile(p); acc.push({ name: pre + n, bytes: d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) }); }
+    }
+    return acc;
+  }
+
+  function finish(code, why) {
+    if (done) return;
+    done = true;
+    if (why) log.push(why);
+    let files = [];
+    try { files = listOut(window.FS, '/tmp/out', '', []); } catch (e) { log.push('could not read /tmp/out: ' + ((e && e.message) || e)); }
+    post({ type: 'lo-done', id: job.id, code, files, log: log.slice(-200) }, files.map(f => f.bytes));
+  }
+
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || d.type !== 'lo-run' || job) return;
+    job = d;
+    if (typeof WebAssembly.Suspending !== 'function') { finish(-1, 'this browser has no WebAssembly JSPI (WebAssembly.Suspending), which the engine needs'); return; }
+    window.Module = {
+      arguments: d.args,
+      locateFile: (p) => new URL(BIN + p + '?v=' + V, location.href).href,
+      mainScriptUrlOrBlob: new Blob(["importScripts('" + new URL(BIN + 'soffice.js?v=' + V, location.href).href + "');"], { type: 'text/javascript' }),
+      print: (t) => onLine(String(t)),
+      printErr: (t) => { t = String(t); if (!/^warn:|^info:/.test(t)) onLine(t); },
+      preRun: [() => {
+        const FS = window.FS;
+        FS.mkdirTree('/tmp/in'); FS.mkdirTree('/tmp/out');
+        for (const f of d.files || []) FS.writeFile('/tmp/in/' + f.name, new Uint8Array(f.bytes));
+        if (d.fonts && d.fonts.length) {
+          const fd = '/instdir/share/fonts/truetype';
+          try { FS.mkdirTree(fd); } catch (_) {}
+          for (const f of d.fonts) { try { FS.writeFile(fd + '/' + String(f.name).replace(/[^A-Za-z0-9._-]/g, '_'), new Uint8Array(f.bytes)); } catch (_) {} }
+        }
+      }],
+      onExit: (code) => finish(code),
+      onAbort: (what) => finish(-1, 'aborted: ' + what),
+    };
+    const s = document.createElement('script');
+    s.src = BIN + 'soffice.js?v=' + V;
+    s.onerror = () => finish(-1, 'could not load ' + s.src);
+    document.body.appendChild(s);
+    setInterval(checkDone, 300);
+  });
+  post({ type: 'lo-ready' });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LibreOffice editor</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fff; --mut: #6e6e73; --line: #d2d2d7; --acc: #0a66c2; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --bg: #161617; --mut: #a1a1a6; --line: #3a3a3c; --acc: #4c9be8; } }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+  header b { font-size: 15px; }
+  header span { color: var(--mut); }
+  button { font: inherit; background: var(--acc); color: #fff; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #host { flex: 1; min-height: 0; }
+  #empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--mut); padding: 16px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <b>LibreOffice editor</b>
+  <input type="file" id="file" accept=".docx,.doc,.odt,.rtf,.xlsx,.xls,.ods,.csv,.pptx,.ppt,.odp">
+  <button id="save" disabled>Save a copy</button>
+  <span id="st"></span>
+</header>
+<div id="empty">Open a document: it is edited by real LibreOffice running on this page (no upload, no cross-origin isolation).</div>
+<div id="host" hidden></div>
+<script type="module">
+  import { mountEditor } from './libreoffice.js';
+  const $ = (id) => document.getElementById(id);
+  let ed = null, name = '';
+  if (typeof WebAssembly.Suspending !== 'function') $('empty').textContent = 'This browser has no WebAssembly JSPI, which the editor needs (Chrome or Edge 137+).';
+  $('file').onchange = async () => {
+    const f = $('file').files[0]; if (!f) return;
+    name = f.name.replace(/[^A-Za-z0-9._-]/g, '_');
+    $('empty').hidden = true; $('host').hidden = false; $('st').textContent = 'Opening…';
+    const bytes = await f.arrayBuffer();
+    if (!ed) { ed = mountEditor($('host'), {}); ed.onModified = (m) => { $('st').textContent = m ? 'Modified' : ''; }; ed.onSaveRequest = () => $('save').click(); }
+    try { const r = await ed.openDocument(name, bytes); $('st').textContent = r.docType + (r.parts > 1 ? ', ' + r.parts + ' parts' : ''); $('save').disabled = false; }
+    catch (e) { $('st').textContent = String(e.message || e); }
+  };
+  $('save').onclick = async () => {
+    const { bytes } = await ed.save();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([bytes])); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  };
+</script>
+</body>
+</html>

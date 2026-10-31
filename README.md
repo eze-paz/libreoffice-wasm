@@ -57,13 +57,56 @@ Files:
 |---|---|
 | `engine.html` | Runs one soffice command line per page load. Load it in a hidden same-origin iframe, one per job. The postMessage protocol is documented at the top of the file. |
 | `coop.js` | The cooperative-thread runtime. `engine.html` loads it. |
-| `libreoffice.js` | A small ES module client: `convert(files, to, {options, fonts})` and `run(args, files)`. It queues jobs one at a time, because each job boots its own runtime and uses up to ~1 GB of wasm memory while it runs. |
+| `editor.html` | The live editor: one document stays open, edited by people and code at the same time (see below). |
+| `edit.html` | The editor demo: open a document, edit it, save a copy. |
+| `libreoffice.js` | A small ES module client: `convert(files, to, {options, fonts})`, `run(args, files)` and `mountEditor(el, {name, bytes})`. It queues jobs one at a time, because each job boots its own runtime and uses up to ~1 GB of wasm memory while it runs. |
 | `index.html` | The demo page. |
 | `bin/` | `soffice.js`, `soffice.wasm`, `soffice.data`, `soffice.data.js.metadata` (from the release, or from your own build). |
 
 Extra fonts: pass `fonts: [{name: 'MyFont.ttf', bytes}]`. Without them, LibreOffice uses its
 bundled set: Liberation (metric-compatible with Arial, Times New Roman and Courier New),
 Carlito and Caladea (Calibri and Cambria), DejaVu, Noto and others.
+
+### The live editor
+
+`editor.html` keeps one document open and editable: people type and click in it, and code
+edits the same document at the same time. You can try it in `edit.html`.
+
+```js
+import { mountEditor } from './libreoffice.js';
+const ed = mountEditor(document.getElementById('host'), { name: 'report.docx', bytes });
+await ed.ready;                                            // { docType, parts }
+await ed.call('insert', { text: 'New paragraph', after_paragraph: 2 });
+await ed.call('command', { uno: '.uno:Bold', select: 'New paragraph' });
+const text = await ed.call('read');
+const { bytes: saved } = await ed.save();                  // same format; or ed.save('pdf')
+await ed.openDocument('deck.pptx', other);                 // reuses the same engine (~1 s)
+```
+
+- It is built on LibreOfficeKit, the API Collabora Online uses. LibreOffice paints tiles
+  onto a canvas, with no Qt GUI.
+- The cursor, the selection, the Calc cell cursor and shape selection are drawn as
+  overlays.
+- Keyboard input (including IME), mouse input and paste work. The toolbar has
+  undo/redo, bold/italic/underline, a slide/sheet picker and zoom.
+- Calc gets row/column headers and a formula bar.
+- Operations (`ed.call(op, args)`):
+  - `read`;
+  - `replace` (`find`, `replace`, `regex`);
+  - `insert` (`text`, `after_paragraph` | `at`);
+  - `set_cells` (`cells`, `sheet`);
+  - `command` (`uno`, `args`, `select`);
+  - `save` (`format`).
+- **Two views.** Code acts in a second LibreOffice view. A `command` with `select` runs on
+  that view's own cursor, which the user sees in orange. The user's cursor never moves.
+  Without `select`, the command applies to the user's selection.
+- **Input ordering.** Posted input (keys, clicks, async `.uno:` commands) is applied by
+  LibreOffice's main loop. Before running an operation, the editor waits until everything
+  posted so far has landed, so operations never interleave with half-applied typing.
+- **Threads.** All LibreOfficeKit calls run on a pthread taken over for the purpose (see
+  `build/patchglue.cjs`). On the page thread a wait would busy-spin.
+- **Callbacks.** LibreOfficeKit's callbacks reach JS through a function the editor adds
+  to every thread's table (`-sALLOW_TABLE_GROWTH`, see `lo-source.patch`).
 
 ### Serving
 
@@ -99,7 +142,9 @@ build/pack.sh ~/lo/instdir/program bin     # coopwait + patchglue + .gz copies
 - `autogen.input` is headless (`--disable-gui`) with `--with-wasm-module=calc writer impress`.
 - `lo-source.patch` fixes a compile error on that master commit, in
   `comphelper/source/crypto/Crypto_OpenSSL.cxx`, where a const vector gets resized. Only
-  OpenSSL targets hit it.
+  OpenSSL targets hit it. It also links soffice with `-sALLOW_TABLE_GROWTH` and `addFunction`
+  (for the editor's callbacks), and makes the wasm main loop apply every pending posted event
+  per iteration in LibreOfficeKit mode (`vcl/headless/svpinst.cxx`).
 - Host packages configure asks for include gperf, flex, bison, nasm, libarchive-zip-perl,
   libfont-ttf-perl and libxml-parser-perl.
 

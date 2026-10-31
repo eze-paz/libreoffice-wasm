@@ -65,6 +65,7 @@
       const f = document.createElement('iframe');
       f.style.display = 'none'; f.name = name; document.body.appendChild(f);
       this.frame = f; const w = f.contentWindow; this.win = w;
+      (window.__coopRealms = window.__coopRealms || []).push(w);   // every thread realm (editor.html)
       const self = this;
       w.name = name;
       // a worker's global API, inside the iframe realm
@@ -82,7 +83,7 @@
       setTimeout(() => { try { w.importScripts(url); } catch (e) { log('worker load failed', e && e.stack || e); self.onerror && self.onerror(e); } }, 0);
     }
     postMessage(msg, tr) { const w = this.win, ports = (Array.isArray(tr) ? tr : (tr && tr.transfer) || []).filter((x) => x instanceof MessagePort); setTimeout(() => { try { if (msg && msg.wasmMemory) window.__coop.setMemory(msg.wasmMemory); w.onmessage && w.onmessage({ data: msg, ports }); } catch (e) { log('worker onmessage threw', e && e.stack || e); } }, 0); }
-    terminate() { try { this.frame.remove(); } catch (_) {} }
+    terminate() { const r = window.__coopRealms; if (r) { const i = r.indexOf(this.win); if (i >= 0) r.splice(i, 1); } try { this.frame.remove(); } catch (_) {} }
     addEventListener(t, fn) { if (t === 'message') this.onmessage = fn; else if (t === 'error') this.onerror = fn; }
     unref() {} ref() {}
   }

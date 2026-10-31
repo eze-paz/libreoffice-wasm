@@ -1,6 +1,6 @@
 {
   "name": "libreoffice-wasm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "LibreOffice (Writer, Calc, Impress) in the browser via WebAssembly, without cross-origin isolation",
   "type": "module",
   "license": "MIT",

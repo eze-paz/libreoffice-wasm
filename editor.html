@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LibreOffice editor</title>
+<!-- One live LibreOffice document, editable by the user (tiles + mouse/keyboard) and by the
+     agent (UNO operations on the same document) at the same time. One iframe per open file
+     (libreoffice.js, mountEditor). LibreOfficeKit runs on the cooperative
+     threads (coop.js), so the page needs no cross-origin isolation.
+     Every LibreOfficeKit / UNO call runs on the "LOK thread": the pthread callMain() starts,
+     taken over through the glue's __coopEntryHook (build/patchglue.cjs). A wait on the page
+     thread would busy-spin; on a pthread it suspends. Calls go through ONE queue because they
+     share that thread's stack.
+     postMessage protocol with the parent:
+       editor → parent  {type:'lok-ready'}
+       parent → editor  {type:'lok-open', name, bytes:ArrayBuffer}
+       editor → parent  {type:'lok-opened', docType:'text'|'spreadsheet'|'presentation'|'drawing', parts}
+                        {type:'lok-failed', error}
+                        {type:'lok-modified', modified:bool}
+                        {type:'lok-save-request'}                      (Ctrl+S in the editor)
+       parent → editor  {type:'lok-call', id, op, args}
+       editor → parent  {type:'lok-reply', id, ok, value, error, bytes?}
+     ops: save, read, replace, insert, set_cells, command (see ops below). -->
+<style>
+  :root { color-scheme: light dark; --bg: #e8eaed; --bar: #f7f7f8; --fg: #1d1d1f; --mut: #6e6e73; --line: #d2d2d7; --on: #dbe6f6; --acc: #0a66c2; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #2b2d31; --bar: #1e1f22; --fg: #e8e8ea; --mut: #a1a1a6; --line: #3a3b3f; --on: #2c3e57; --acc: #4c9be8; } }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px system-ui, sans-serif; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  #bar { flex: none; display: flex; gap: 2px; align-items: center; padding: 3px 6px; background: var(--bar); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  #bar button, #bar select { font: inherit; height: 26px; min-width: 28px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--fg); cursor: pointer; padding: 0 6px; }
+  #bar button:hover { border-color: var(--line); }
+  #bar button.on { background: var(--on); }
+  #bar button:disabled { opacity: .4; cursor: default; }
+  #bar select { border-color: var(--line); background: var(--bar); }
+  .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+  #status { margin-left: auto; color: var(--mut); font-size: 12px; padding-right: 4px; white-space: nowrap; }
+  #fbar { flex: none; display: flex; gap: 6px; align-items: center; padding: 3px 6px; background: var(--bar); border-bottom: 1px solid var(--line); }
+  #fbar[hidden] { display: none; }
+  #fbar input { font: 12px ui-monospace, monospace; height: 22px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); padding: 0 6px; box-sizing: border-box; }
+  #addr { width: 80px; }
+  #formula { flex: 1; min-width: 0; }
+  .fx { color: var(--mut); font-style: italic; }
+  #main { flex: 1; min-height: 0; display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto 1fr; }
+  #corner, #colhdr, #rowhdr { display: block; background: var(--bar); }
+  #corner { grid-area: 1 / 1; } #colhdr { grid-area: 1 / 2; cursor: s-resize; } #rowhdr { grid-area: 2 / 1; cursor: e-resize; }
+  #corner[hidden], #colhdr[hidden], #rowhdr[hidden] { display: none; }
+  #scroller { grid-area: 2 / 2; min-width: 0; min-height: 0; position: relative; overflow: auto; outline: none; }
+  #sizer { position: relative; }
+  #view { position: absolute; left: 0; top: 0; display: block; cursor: text; }
+  #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .cur { position: absolute; width: 2px; background: currentColor; color: #000; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .selr { position: absolute; background: rgba(66, 133, 244, .28); }
+  .cellc { position: absolute; border: 2px solid #1a73e8; box-sizing: border-box; }
+  .gsel { position: absolute; border: 1px dashed #1a73e8; box-sizing: border-box; }
+  /* the agent's own view: its cursor and selection, in orange */
+  .ai-cur { position: absolute; width: 2px; background: #f08c00; }
+  .ai-cur::after { content: 'AI'; position: absolute; left: 0; top: -13px; font: 600 9px/12px system-ui, sans-serif; color: #fff; background: #f08c00; padding: 0 3px; border-radius: 2px; }
+  .ai-sel { position: absolute; background: rgba(240, 140, 0, .25); }
+  .ai-cell { position: absolute; border: 2px dashed #f08c00; box-sizing: border-box; }
+  #ime { position: absolute; left: -1000px; top: 0; width: 20px; height: 20px; opacity: 0; }
+  #msg[hidden] { display: none; }
+  #msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--mut); pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="undo" title="Undo (Ctrl+Z)" disabled>↶</button>
+  <button id="redo" title="Redo (Ctrl+Y)" disabled>↷</button>
+  <span class="sep"></span>
+  <button id="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+  <button id="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+  <button id="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+  <span class="sep"></span>
+  <select id="part" title="Slide / sheet" hidden></select>
+  <button id="zout" title="Zoom out">−</button>
+  <button id="zin" title="Zoom in">+</button>
+  <span id="status">Starting LibreOffice…</span>
+</div>
+<div id="fbar" hidden><input id="addr" spellcheck="false" title="Cell or range — Enter goes there"><span class="fx">fx</span><input id="formula" spellcheck="false" title="Cell content — Enter sets it, Esc cancels"></div>
+<div id="main">
+  <canvas id="corner" hidden></canvas><canvas id="colhdr" hidden></canvas><canvas id="rowhdr" hidden></canvas>
+  <div id="scroller" tabindex="-1">
+    <div id="sizer"><canvas id="view"></canvas><div id="overlay"></div></div>
+    <div id="msg">Starting LibreOffice…</div>
+  </div>
+</div>
+<textarea id="ime" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+<canvas id="qtcanvas" style="display:none"></canvas>
+<script src="coop.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const V = new URLSearchParams(location.search).get('v') || '1';
+  const BIN = 'bin/';
+  const post = (m, tr) => parent.postMessage(m, '*', tr || []);
+  const log = window.__loLog = [];
+  const status = (t) => { $('status').textContent = t; };
+  const say = (t) => { log.push(t); if (log.length > 400) log.splice(0, 100); };
+
+  // ---- the LibreOffice runtime --------------------------------------------------------
+  let W = null;                 // the LOK thread's realm (an iframe window, coop.js)
+  let kit = 0, kcls = 0, doc = 0, dcls = 0;
+  const S = { docType: -1, parts: 1, part: 0, size: [0, 0], zoom: 1, modified: false, ext: '', name: '', userView: 0, aiView: -1 };
+  const TYPES = ['text', 'spreadsheet', 'presentation', 'drawing'];
+  // LibreOfficeKitClass / LibreOfficeKitDocumentClass slots (include/LibreOfficeKit/LibreOfficeKit.h)
+  const K = { documentLoad: 2, getError: 3 };
+  const D = { saveAs: 2, getDocumentType: 3, getParts: 4, getPart: 6, setPart: 7, getPartName: 8, paintTile: 10, getDocumentSize: 12,
+    initializeForRendering: 13, registerCallback: 14, postKeyEvent: 15, postMouseEvent: 16, postUnoCommand: 17, getTextSelection: 19, paste: 20,
+    getCommandValues: 23, setClientZoom: 24, setClientVisibleArea: 25, createView: 26, setView: 28, getView: 29 };
+
+  window.Module = {
+    noInitialRun: true,
+    locateFile: (p) => new URL(BIN + p + '?v=' + V, location.href).href,
+    mainScriptUrlOrBlob: new Blob(["importScripts('" + new URL(BIN + 'soffice.js?v=' + V, location.href).href + "');"], { type: 'text/javascript' }),
+    print: (t) => say(String(t)),
+    printErr: (t) => { t = String(t); if (!/^warn:|^info:|unsupported syscall/.test(t)) say(t); },
+    preRun: [() => { FS.mkdirTree('/tmp/in'); FS.mkdirTree('/tmp/out'); }],
+    onRuntimeInitialized: () => { runtimeUp(); },
+    onAbort: (w) => fail('LibreOffice stopped: ' + w),
+  };
+  let runtimeUp; const runtimeReady = new Promise((r) => { runtimeUp = r; });
+
+  // Every LOK/UNO call goes through this queue (one stack on the LOK thread).
+  let chain = Promise.resolve();
+  // With two views, LibreOffice may make the other one current on its own (activation events
+  // from the main loop), so every job starts on the user's view (the agent's select job
+  // switches to its own view inside, and back).
+  const queue = (fn) => { const p = chain.then(async () => { if (doc && S.aiView >= 0) await dcall(D.setView, S.userView); return fn(); }); chain = p.catch(() => {}); return p; };
+  const fnAt = (vt, i) => W.getWasmTableEntry(HEAPU32[(vt >> 2) + i]);
+  const P = (f) => WebAssembly.promising(f);
+  const kcall = (i, ...a) => P(fnAt(kcls, i))(kit, ...a);
+  const dcall = (i, ...a) => P(fnAt(dcls, i))(doc, ...a);
+  const cstr = (s) => { const b = new TextEncoder().encode(String(s) + '\0'); const p = W._malloc(b.length); HEAPU8.set(b, p); return p; };
+  const withStrs = async (strs, fn) => { const ps = strs.map((s) => (s == null ? 0 : cstr(s))); try { return await fn(...ps); } finally { ps.forEach((p) => p && W._free(p)); } };
+
+  // A JS function in the wasm table of EVERY realm at the same index (callbacks may come
+  // from any LibreOffice thread). Realms not up yet get it from the glue's instance hook.
+  const tableFns = [];
+  let cbIndex = 0;   // onCallback's table index, the same in every realm
+  function addToRealm(w) {
+    if (!w.wasmTable || !w.addFunction) return;
+    while ((w.__coopAdded || 0) < tableFns.length) {
+      const [fn, sig, idx] = tableFns[w.__coopAdded || 0];
+      const got = w.addFunction(fn, sig);
+      if (got !== idx) say('table index mismatch in a thread realm: ' + got + ' != ' + idx);
+      w.__coopAdded = (w.__coopAdded || 0) + 1;
+    }
+  }
+  // Count LibreOffice main-loop iterations (the glue sets __coopLoopBusy around each one).
+  function countIterations(w) {
+    if (w.__coopIterHooked) return; w.__coopIterHooked = true;
+    let b = false;
+    Object.defineProperty(w, '__coopLoopBusy', { configurable: true, get: () => b, set: (v) => { if (b && !v) { w.__coopIters = (w.__coopIters || 0) + 1; lastIterAt = performance.now(); } b = !!v; } });
+  }
+  let lastIterAt = 0;
+  const iterations = () => (window.__coopRealms || []).reduce((n, w) => n + (w.__coopIters || 0), 0);
+  window.__coopOnInstance = (w) => { countIterations(w); addToRealm(w); };
+  function coopAddFunction(fn, sig) {
+    const idx = addFunction(fn, sig);
+    tableFns.push([fn, sig, idx]);
+    for (const w of window.__coopRealms || []) addToRealm(w);
+    return idx;
+  }
+
+  async function boot() {
+    await runtimeReady;
+    if (typeof WebAssembly.Suspending !== 'function') throw new Error('this browser has no WebAssembly JSPI, which the editor needs');
+    for (const w of window.__coopRealms || []) countIterations(w);
+    W = await new Promise((resolve) => { window.__coopEntryHook = (w) => { window.__coopEntryHook = null; resolve(w); return true; }; callMain([]); });
+    kit = await withStrs(['/instdir/program'], (p) => P(W.wasmExports.libreofficekit_hook_2)(p, 0));
+    if (!kit) throw new Error('LibreOfficeKit did not start');
+    kcls = HEAPU32[kit >> 2];
+  }
+
+  async function openDoc(name, bytes) {
+    S.name = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'document';
+    S.ext = (S.name.split('.').pop() || '').toLowerCase();
+    FS.writeFile('/tmp/in/' + S.name, new Uint8Array(bytes));
+    status('Opening…');
+    await queue(async () => {
+      doc = await withStrs(['file:///tmp/in/' + S.name, 'Language=en-US'], (u, o) => kcall(4 /* documentLoadWithOptions */, u, o));
+      if (!doc) { const e = await kcall(K.getError); throw new Error('LibreOffice could not open ' + name + (e ? ': ' + UTF8ToString(e) : '')); }
+      dcls = HEAPU32[doc >> 2];
+      await withStrs(['{}'], (a) => dcall(D.initializeForRendering, a));
+      if (!cbIndex) cbIndex = coopAddFunction(onCallback, 'viii');
+      await dcall(D.registerCallback, cbIndex, 0);
+      S.docType = await dcall(D.getDocumentType);
+      S.parts = await dcall(D.getParts);
+      S.part = await dcall(D.getPart);
+      // the agent gets a view of its own (its own cursor and selection, drawn in orange), so
+      // its commands never move the user's cursor; every call then goes back to the user's view
+      S.userView = await dcall(D.getView);
+      S.aiView = await dcall(D.createView);
+      await dcall(D.setView, S.userView);
+    });
+    const calc = S.docType === 1;
+    $('fbar').hidden = !calc; ['corner', 'colhdr', 'rowhdr'].forEach((id) => { $(id).hidden = !calc; });
+    await refreshSize();
+    await fillParts();
+    // pages and slides start at the zoom that fits their width in the pane (never above
+    // 100%); a spreadsheet's grid has no page width, so it stays at 100%
+    if (S.size[0] > 0 && S.docType !== 1) S.zoom = Math.max(0.25, Math.min(1, (scroller.clientWidth - 16) / (S.size[0] / 15)));
+    if (S.zoom !== 1) await queue(async () => { const t = Math.round(256 * 15 / S.zoom); await dcall(D.setClientZoom, 256, 256, t, t); });
+    $('msg').hidden = true;
+    status('');
+    layout();
+    $('ime').focus();
+    return { docType: TYPES[S.docType] || 'other', parts: S.parts };
+  }
+
+  async function refreshSize() {
+    await queue(async () => {
+      const p = W._malloc(16);
+      try { HEAP32[p >> 2] = 0; HEAP32[(p >> 2) + 1] = 0; await dcall(D.getDocumentSize, p, p + 4); S.size = [HEAP32[p >> 2], HEAP32[(p >> 2) + 1]]; }
+      finally { W._free(p); }
+    });
+  }
+  async function fillParts() {
+    const sel = $('part');
+    if (S.parts < 2 && S.docType === 0) { sel.hidden = true; return; }
+    const names = await queue(async () => { const out = []; for (let i = 0; i < S.parts; i++) { const s = await dcall(D.getPartName, i); out.push(s ? UTF8ToString(s) : ''); if (s) W._free(s); } return out; });
+    sel.innerHTML = '';
+    names.forEach((n, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (S.docType === 2 ? 'Slide ' + (i + 1) : n || 'Sheet ' + (i + 1)); sel.appendChild(o); });
+    sel.value = String(S.part); sel.hidden = S.parts < 2;
+  }
+
+  // ---- view: twips <-> css px, painting -----------------------------------------------
+  const scroller = $('scroller'), sizer = $('sizer'), canvas = $('view'), overlay = $('overlay');
+  const pxPerTwip = () => S.zoom / 15;
+  const MARGIN = 0;
+  function layout() {
+    const k = pxPerTwip();
+    sizer.style.width = Math.max(scroller.clientWidth, Math.ceil(S.size[0] * k) + MARGIN) + 'px';
+    sizer.style.height = Math.max(scroller.clientHeight, Math.ceil(S.size[1] * k) + MARGIN) + 'px';
+    overlay.style.width = sizer.style.width; overlay.style.height = sizer.style.height;
+    drawOverlay();
+    schedulePaint();
+  }
+  let paintPending = false, painting = false;
+  function schedulePaint() { if (paintPending) return; paintPending = true; setTimeout(() => { paintPending = false; paint(); }, 16); }
+  async function paint() {
+    if (!doc) return;
+    if (painting) { schedulePaint(); return; }
+    painting = true;
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      const cw = scroller.clientWidth, ch = scroller.clientHeight, sl = scroller.scrollLeft, st = scroller.scrollTop;
+      const pw = Math.max(1, Math.round(cw * dpr)), ph = Math.max(1, Math.round(ch * dpr));
+      const tw = Math.round(cw / pxPerTwip()), th = Math.round(ch / pxPerTwip()), tx = Math.round(sl / pxPerTwip()), ty = Math.round(st / pxPerTwip());
+      const px = await queue(async () => {
+        if (S.docType === 1) await dcall(D.setClientVisibleArea, tx, ty, tw, th);
+        const buf = W._malloc(pw * ph * 4);
+        try { await dcall(D.paintTile, buf, pw, ph, tx, ty, tw, th); return HEAPU8.slice(buf, buf + pw * ph * 4); }
+        finally { W._free(buf); }
+      });
+      for (let i = 0; i < px.length; i += 4) { const b = px[i]; px[i] = px[i + 2]; px[i + 2] = b; }   // BGRA → RGBA
+      canvas.width = pw; canvas.height = ph;
+      canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px';
+      canvas.style.left = sl + 'px'; canvas.style.top = st + 'px';
+      canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(px.buffer), pw, ph), 0, 0);
+      window.__loPaints = (window.__loPaints || 0) + 1;
+      if (S.docType === 1) await drawHeaders(tx, ty, tw, th);
+    } catch (e) { say('paint failed: ' + ((e && e.message) || e)); }
+    finally { painting = false; }
+  }
+  // ---- Calc: row / column headers (LibreOffice's own geometry, .uno:ViewRowColumnHeaders) ----
+  const HDR_W = 44, HDR_H = 20;
+  const hdr = { cols: [], rows: [], unit: 1 };   // spans [{ label, from, to }] in twips
+  const isNum = (t) => /^[0-9]+$/.test(t);
+  function colNum(t) { let n = 0; for (const ch of String(t).toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64); return n; }
+  function colName(n) { let t = ''; while (n > 0) { const m = (n - 1) % 26; t = String.fromCharCode(65 + m) + t; n = (n - 1 - m) / 26; } return t; }
+  // [{text, size}]: "size" is where the labelled row/column ends; an entry may close a run of
+  // equal-sized rows/columns (LibreOffice skips repeats), so split runs evenly
+  function spans(list, unit) {
+    const out = []; let prevEnd = null, prevNum = null;
+    for (const e of list || []) {
+      const end = Number(e.size) * unit, label = String(e.text), num = isNum(label) ? +label : colNum(label);
+      if (prevEnd != null) {
+        const n = Math.max(1, num - prevNum), step = (end - prevEnd) / n;
+        for (let i = 1; i <= n; i++) out.push({ label: isNum(label) ? String(prevNum + i) : colName(prevNum + i), from: prevEnd + step * (i - 1), to: prevEnd + step * i });
+      } else out.push({ label, from: null, to: end });
+      prevEnd = end; prevNum = num;
+    }
+    if (out.length > 1 && out[0].from == null) out[0].from = out[0].to - (out[1].to - out[1].from);
+    return out.filter((x) => x.from != null);
+  }
+  async function drawHeaders(tx, ty, tw, th) {
+    let j;
+    try {
+      const txt = await queue(async () => {
+        const p = await withStrs(['.uno:ViewRowColumnHeaders?x=' + tx + '&y=' + ty + '&width=' + tw + '&height=' + th], (c) => dcall(D.getCommandValues, c));
+        const t = p ? UTF8ToString(p) : ''; if (p) W._free(p); return t;
+      });
+      j = JSON.parse(txt || '{}');
+    } catch (e) { say('headers: ' + ((e && e.message) || e)); return; }
+    window.__loHeaders = j;
+    // sizes come in LibreOffice's 100% pixels (15 twips each) unless they are already twips
+    const lastCol = (j.columns || []).slice(-1)[0];
+    hdr.unit = lastCol && Number(lastCol.size) > tx + tw * 1.5 ? 1 : 15;
+    hdr.cols = spans(j.columns, hdr.unit); hdr.rows = spans(j.rows, hdr.unit);
+    const dpr = window.devicePixelRatio || 1, k = pxPerTwip(), css = getComputedStyle(document.body);
+    const fg = css.getPropertyValue('--mut').trim() || '#666', line = css.getPropertyValue('--line').trim() || '#ccc';
+    const prep = (c, w, h) => { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); c.style.width = w + 'px'; c.style.height = h + 'px'; const g = c.getContext('2d'); g.scale(dpr, dpr); g.font = '11px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = fg; g.strokeStyle = line; return g; };
+    const cw = scroller.clientWidth, ch = scroller.clientHeight;
+    const gc = prep($('colhdr'), cw, HDR_H);
+    for (const c of hdr.cols) { const a = (c.from - tx) * k, b = (c.to - tx) * k; if (b < 0 || a > cw) continue; gc.beginPath(); gc.moveTo(Math.round(b) + 0.5, 0); gc.lineTo(Math.round(b) + 0.5, HDR_H); gc.stroke(); if (b - a > 14) gc.fillText(c.label, (a + b) / 2, HDR_H / 2); }
+    gc.beginPath(); gc.moveTo(0, HDR_H - 0.5); gc.lineTo(cw, HDR_H - 0.5); gc.stroke();
+    const gr = prep($('rowhdr'), HDR_W, ch);
+    for (const r of hdr.rows) { const a = (r.from - ty) * k, b = (r.to - ty) * k; if (b < 0 || a > ch) continue; gr.beginPath(); gr.moveTo(0, Math.round(b) + 0.5); gr.lineTo(HDR_W, Math.round(b) + 0.5); gr.stroke(); if (b - a > 9) gr.fillText(r.label, HDR_W / 2, (a + b) / 2); }
+    gr.beginPath(); gr.moveTo(HDR_W - 0.5, 0); gr.lineTo(HDR_W - 0.5, ch); gr.stroke();
+    prep($('corner'), HDR_W, HDR_H);
+  }
+  // a click on a header selects that column / row
+  const hdrAt = (list, t) => list.find((x) => t >= x.from && t < x.to);
+  $('colhdr').addEventListener('mousedown', async (e) => {
+    e.preventDefault(); const c = hdrAt(hdr.cols, (scroller.scrollLeft + e.offsetX) / pxPerTwip()); if (!c) return;
+    await uno('.uno:GoToCell', { ToPoint: { type: 'string', value: c.label + '1' } }); await uno('.uno:SelectColumn'); $('ime').focus({ preventScroll: true });
+  });
+  $('rowhdr').addEventListener('mousedown', async (e) => {
+    e.preventDefault(); const r = hdrAt(hdr.rows, (scroller.scrollTop + e.offsetY) / pxPerTwip()); if (!r) return;
+    await uno('.uno:GoToCell', { ToPoint: { type: 'string', value: 'A' + r.label } }); await uno('.uno:SelectRow'); $('ime').focus({ preventScroll: true });
+  });
+  // ---- Calc: formula bar --------------------------------------------------------------
+  const addr = $('addr'), formula = $('formula');
+  const backToSheet = (el) => { el.blur(); $('ime').focus({ preventScroll: true }); };
+  formula.addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); await uno('.uno:EnterString', { StringName: { type: 'string', value: formula.value } }); backToSheet(formula); }
+    else if (e.key === 'Escape') { e.preventDefault(); formula.value = formula.dataset.v || ''; backToSheet(formula); }
+  });
+  addr.addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); await uno('.uno:GoToCell', { ToPoint: { type: 'string', value: addr.value.trim() } }); backToSheet(addr); }
+    else if (e.key === 'Escape') { e.preventDefault(); addr.value = addr.dataset.v || ''; backToSheet(addr); }
+  });
+
+  scroller.addEventListener('scroll', schedulePaint);
+  new ResizeObserver(() => { if (doc) layout(); }).observe(scroller);
+
+  // ---- callbacks from LibreOffice (cursor, selection, invalidations, state) -----------
+  const ov = { cursor: null, cursorVisible: true, sel: [], cell: null, gsel: null, ai: { cursor: null, visible: true, sel: [], cell: null } };
+  const rect = (s) => { const n = String(s).split(',').map((x) => parseInt(x, 10)); return n.length >= 4 && n.slice(0, 4).every(Number.isFinite) ? n.slice(0, 4) : null; };
+  const payloadRect = (s) => { s = String(s || ''); if (s[0] === '{') { try { const j = JSON.parse(s); return rect(j.rectangle || ''); } catch (_) { return null; } } return /^EMPTY/.test(s) ? null : rect(s); };
+  const STATE = {};
+  function onCallback(type, payloadPtr) {
+    const p = payloadPtr ? UTF8ToString(payloadPtr) : '';
+    switch (type) {
+      case 0: schedulePaint(); break;                                                     // INVALIDATE_TILES
+      case 1: ov.cursor = payloadRect(p); drawOverlay(); scrollToCursor(); break;          // INVALIDATE_VISIBLE_CURSOR
+      case 2: ov.sel = p ? p.split(';').map(rect).filter(Boolean) : []; drawOverlay(); break; // TEXT_SELECTION
+      case 5: ov.cursorVisible = p === 'true'; drawOverlay(); break;                       // CURSOR_VISIBLE
+      case 6: ov.gsel = payloadRect(p); drawOverlay(); break;                              // GRAPHIC_SELECTION
+      case 8: onState(p); break;                                                           // STATE_CHANGED
+      case 13: refreshSize().then(layout); break;                                          // DOCUMENT_SIZE_CHANGED
+      case 14: S.part = parseInt(p, 10) || 0; $('part').value = String(S.part); refreshSize().then(layout); break; // SET_PART
+      case 17: ov.cell = payloadRect(p); drawOverlay(); break;                             // CELL_CURSOR
+      case 19: if (document.activeElement !== formula) formula.value = p; formula.dataset.v = p; break;   // CELL_FORMULA
+      case 34: if (document.activeElement !== addr) addr.value = p; addr.dataset.v = p; break;            // CELL_ADDRESS
+      case 33: schedulePaint(); break;                                                     // INVALIDATE_HEADER
+      case 24: case 25: case 26: case 28: onOtherView(type, p); break;                     // the agent's view
+      default: break;
+    }
+  }
+  function onOtherView(type, p) {
+    let j; try { j = JSON.parse(p); } catch (_) { return; }
+    if (String(j.viewId) !== String(S.aiView)) return;
+    const ai = ov.ai, r0 = (v) => rect(/^EMPTY/.test(String(v || '')) ? '' : v || '');
+    if (type === 24) ai.cursor = r0(j.rectangle);
+    else if (type === 25) ai.sel = j.selection ? String(j.selection).split(';').map(rect).filter(Boolean) : [];
+    else if (type === 26) ai.cell = r0(j.rectangle);
+    else if (type === 28) ai.visible = String(j.visible) === 'true';
+    drawOverlay();
+  }
+  function onState(p) {
+    let cmd, val;
+    if (p[0] === '{') { try { const j = JSON.parse(p); cmd = j.commandName; val = j.state; } catch (_) { return; } }
+    else { const i = p.indexOf('='); if (i < 0) return; cmd = p.slice(0, i); val = p.slice(i + 1); }
+    STATE[cmd] = val;
+    const on = (id, c) => { if (cmd === c) $(id).classList.toggle('on', val === 'true'); };
+    on('bold', '.uno:Bold'); on('italic', '.uno:Italic'); on('underline', '.uno:Underline');
+    if (cmd === '.uno:Undo') $('undo').disabled = val === 'disabled';
+    if (cmd === '.uno:Redo') $('redo').disabled = val === 'disabled';
+    if (cmd === '.uno:ModifiedStatus') { const m = val === 'true'; if (m !== S.modified) { S.modified = m; post({ type: 'lok-modified', docId, modified: m }); } }
+  }
+  function box(cls, r) {
+    const k = pxPerTwip(), d = document.createElement('div');
+    d.className = cls;
+    d.style.left = r[0] * k + 'px'; d.style.top = r[1] * k + 'px';
+    d.style.width = Math.max(/cur$/.test(cls) ? 2 : 1, r[2] * k) + 'px'; d.style.height = Math.max(1, r[3] * k) + 'px';
+    overlay.appendChild(d);
+  }
+  function drawOverlay() {
+    overlay.innerHTML = '';
+    for (const r of ov.sel) box('selr', r);
+    if (ov.cell) box('cellc', ov.cell);
+    if (ov.gsel) box('gsel', ov.gsel);
+    if (ov.cursor && ov.cursorVisible && !ov.sel.length) { const r = ov.cursor.slice(); r[2] = 0; box('cur', r); }
+    const ai = ov.ai;
+    for (const r of ai.sel) box('ai-sel', r);
+    if (ai.cell) box('ai-cell', ai.cell);
+    if (ai.cursor && ai.visible && !ai.sel.length) { const r = ai.cursor.slice(); r[2] = 0; box('ai-cur', r); }
+  }
+  function scrollToCursor() {
+    if (!ov.cursor) return;
+    const k = pxPerTwip(), x = ov.cursor[0] * k, y = ov.cursor[1] * k, h = ov.cursor[3] * k;
+    if (y < scroller.scrollTop) scroller.scrollTop = y - 20;
+    else if (y + h > scroller.scrollTop + scroller.clientHeight) scroller.scrollTop = y + h - scroller.clientHeight + 20;
+    if (x < scroller.scrollLeft) scroller.scrollLeft = x - 20;
+    else if (x > scroller.scrollLeft + scroller.clientWidth) scroller.scrollLeft = x - scroller.clientWidth + 40;
+  }
+
+  // ---- input: mouse ------------------------------------------------------------------
+  // Posted events (keys, clicks, .uno: commands) land in LibreOffice's main loop, which applies
+  // every pending one per iteration (svpinst.cxx, LibreOfficeKit mode). Remember the iteration
+  // count at the last post: two more finished iterations mean everything posted has landed.
+  let pendingPost = false, itersAtPost = 0;
+  const posted = () => { pendingPost = true; itersAtPost = iterations(); };
+  const MOD = (e) => (e.shiftKey ? 0x1000 : 0) | (e.ctrlKey || e.metaKey ? 0x2000 : 0) | (e.altKey ? 0x4000 : 0);
+  const twipsAt = (e) => { const r = sizer.getBoundingClientRect(); return [Math.round((e.clientX - r.left) / pxPerTwip()), Math.round((e.clientY - r.top) / pxPerTwip())]; };
+  const btn = (e) => (e.button === 2 ? 4 : e.button === 1 ? 2 : 1);
+  let down = 0, moveQueued = null;
+  const mouse = (type, x, y, count, buttons, mods) => queue(async () => { await dcall(D.postMouseEvent, type, x, y, count, buttons, mods); posted(); });
+  canvas.addEventListener('mousedown', (e) => {
+    if (!doc) return;
+    e.preventDefault(); $('ime').focus({ preventScroll: true });
+    down = btn(e); const [x, y] = twipsAt(e);
+    mouse(0, x, y, Math.max(1, e.detail || 1), down, MOD(e));
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!down || !doc) return;
+    const [x, y] = twipsAt(e);
+    const send = !moveQueued; moveQueued = [x, y, MOD(e)];
+    if (send) queue(async () => { const [mx, my, mm] = moveQueued; moveQueued = null; await dcall(D.postMouseEvent, 2, mx, my, 1, down, mm); posted(); });
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (!down || !doc) return;
+    const [x, y] = twipsAt(e), b = down; down = 0;
+    mouse(1, x, y, Math.max(1, e.detail || 1), b, MOD(e));
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // ---- input: keyboard (hidden textarea keeps focus and receives text / IME) ----------
+  const ime = $('ime');
+  const KEY = { ArrowDown: 1024, ArrowUp: 1025, ArrowLeft: 1026, ArrowRight: 1027, Home: 1028, End: 1029, PageUp: 1030, PageDown: 1031,
+    Enter: 1280, Escape: 1281, Tab: 1282, Backspace: 1283, Insert: 1285, Delete: 1286 };
+  const CHAR = { Enter: 13, Tab: 9, Backspace: 8, Escape: 27 };
+  const key = (charCode, keyCode) => queue(async () => { await dcall(D.postKeyEvent, 0, charCode, keyCode); await dcall(D.postKeyEvent, 1, charCode, keyCode); posted(); });
+  ime.addEventListener('keydown', (e) => {
+    if (!doc || e.isComposing) return;
+    const mods = MOD(e);
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === 's') { e.preventDefault(); post({ type: 'lok-save-request', docId }); return; }
+      if (k === 'v' || k === 'c' || k === 'x') return;   // the paste / copy / cut events handle these
+      if (/^[a-z]$/.test(k)) { e.preventDefault(); key(0, (512 + k.charCodeAt(0) - 97) | mods); return; }
+    }
+    if (KEY[e.key] != null) { e.preventDefault(); key(CHAR[e.key] || 0, KEY[e.key] | mods); }
+  });
+  let composing = false;
+  ime.addEventListener('compositionstart', () => { composing = true; });
+  ime.addEventListener('compositionend', () => { composing = false; flushText(); });
+  ime.addEventListener('input', () => { if (!composing) flushText(); });
+  function flushText() {
+    const t = ime.value; ime.value = '';
+    for (const ch of t) key(ch.codePointAt(0) > 0xffff ? 0 : ch.charCodeAt(0), 0);
+  }
+  ime.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const t = e.clipboardData && e.clipboardData.getData('text/plain');
+    if (t) pasteText(t);
+  });
+  ime.addEventListener('copy', (e) => { e.preventDefault(); copySelection(false); });
+  ime.addEventListener('cut', (e) => { e.preventDefault(); copySelection(true); });
+  function pasteText(t) {
+    queue(async () => {
+      const b = new TextEncoder().encode(t), p = W._malloc(b.length + 1); HEAPU8.set(b, p);
+      try { await withStrs(['text/plain;charset=utf-8'], (m) => dcall(D.paste, m, p, b.length)); } finally { W._free(p); }
+    });
+  }
+  async function selectionText() {
+    return queue(async () => {
+      const used = W._malloc(4); HEAPU32[used >> 2] = 0;
+      try {
+        const s = await withStrs(['text/plain;charset=utf-8'], (m) => dcall(D.getTextSelection, m, used));
+        const out = s ? UTF8ToString(s) : ''; if (s) W._free(s);
+        const um = HEAPU32[used >> 2]; if (um) W._free(um);
+        return out;
+      } finally { W._free(used); }
+    });
+  }
+  async function copySelection(cut) {
+    const t = await selectionText();
+    if (t) { try { await navigator.clipboard.writeText(t); } catch (_) {} }
+    if (cut && t) key(0, 1286);   // Delete
+  }
+
+  // ---- toolbar ------------------------------------------------------------------------
+  const uno = (cmd, args) => queue(async () => { await withStrs([cmd, args ? JSON.stringify(args) : ''], (c, a) => dcall(D.postUnoCommand, c, a, 0)); posted(); });
+  const tb = (id, cmd) => $(id).addEventListener('mousedown', (e) => { e.preventDefault(); if (doc) uno(cmd); ime.focus({ preventScroll: true }); });
+  tb('undo', '.uno:Undo'); tb('redo', '.uno:Redo'); tb('bold', '.uno:Bold'); tb('italic', '.uno:Italic'); tb('underline', '.uno:Underline');
+  $('part').addEventListener('change', async () => { const n = +$('part').value; await queue(() => dcall(D.setPart, n)); S.part = n; await refreshSize(); scroller.scrollTop = 0; layout(); });
+  const zoomTo = (z) => { S.zoom = Math.min(4, Math.max(0.25, z)); queue(async () => { const t = Math.round(256 * 15 / S.zoom); await dcall(D.setClientZoom, 256, 256, t, t); }); layout(); };
+  $('zin').addEventListener('click', () => zoomTo(S.zoom * 1.25));
+  $('zout').addEventListener('click', () => zoomTo(S.zoom / 1.25));
+
+  // ---- agent operations on the live document (JS UNO in the LOK thread's realm) -------
+  // Before the agent touches the document (or it is saved), let everything posted so far land
+  // (see posted()), so agent edits never interleave with half-applied typing. Two finished
+  // iterations: the one running at the last post may have started before it.
+  async function drain() {
+    const t0 = performance.now();
+    while (pendingPost && iterations() < itersAtPost + 2 && performance.now() - t0 < 10000) await new Promise((r) => setTimeout(r, 5));
+    pendingPost = false;
+  }
+  const unoJob = (fn) => queue(async () => { await drain(); const M = W.Module; await M.uno_init; return fn(M, M.uno.com.sun.star); });
+  const any = (M, type, v) => new M.uno_Any(M.uno_Type[type](), v);
+  function model(M) { const m = M.getCurrentModelFromViewSh(); if (!m) throw new Error('no document model'); return m; }
+  function seq(s) { const out = []; for (let i = 0; i < s.size(); i++) out.push(s.get(i)); return out; }
+  function cellsOfTable(css, t) {
+    const tt = css.text.XTextTable.query(t), names = seq(tt.getCellNames()), rows = new Map();
+    for (const n of names) {
+      const m = /^([A-Z]+)(\d+)$/.exec(n); if (!m) continue;
+      const txt = css.text.XText.query(tt.getCellByName(n)).getString();
+      if (!rows.has(m[2])) rows.set(m[2], []); rows.get(m[2]).push(txt);
+    }
+    return [...rows.values()].map((r) => r.join(' | '));
+  }
+  function paragraphs(M, css) {
+    const xText = css.text.XTextDocument.query(model(M)).getText();
+    const en = css.container.XEnumerationAccess.query(xText).createEnumeration();
+    const out = [];
+    while (en.hasMoreElements()) {
+      const a = en.nextElement(), x = a.get();
+      const si = css.lang.XServiceInfo.query(x);
+      if (si && si.supportsService('com.sun.star.text.TextTable')) out.push({ table: cellsOfTable(css, x) });
+      else { const r = css.text.XTextRange.query(x); out.push({ text: r.getString(), range: r }); }
+      a.delete();
+    }
+    return { xText, items: out };
+  }
+  function sheets(M, css) {
+    const ia = css.container.XIndexAccess.query(css.sheet.XSpreadsheetDocument.query(model(M)).getSheets());
+    const out = [];
+    for (let i = 0; i < ia.getCount(); i++) { const a = ia.getByIndex(i); const s = css.sheet.XSpreadsheet.query(a.get()); out.push({ sheet: s, name: css.container.XNamed.query(s).getName() }); a.delete(); }
+    return out;
+  }
+  function activeSheetName(M, css) {
+    try { const v = css.sheet.XSpreadsheetView.query(css.frame.XModel.query(model(M)).getCurrentController()); return css.container.XNamed.query(v.getActiveSheet()).getName(); } catch (_) { return null; }
+  }
+  function pickSheet(M, css, which) {
+    const all = sheets(M, css);
+    if (which == null || which === '') { const n = activeSheetName(M, css); return all.find((s) => s.name === n) || all[0]; }
+    const hit = typeof which === 'number' ? all[which - 1] : all.find((s) => s.name.toLowerCase() === String(which).toLowerCase());
+    if (!hit) throw new Error('no sheet ' + JSON.stringify(which) + ' (sheets: ' + all.map((s) => s.name).join(', ') + ')');
+    return hit;
+  }
+  function pages(M, css) {
+    const ia = css.container.XIndexAccess.query(css.drawing.XDrawPagesSupplier.query(model(M)).getDrawPages());
+    const out = [];
+    for (let i = 0; i < ia.getCount(); i++) { const a = ia.getByIndex(i); out.push(a.get()); }
+    return out;
+  }
+  const ops = {
+    async save(a) {
+      const fmt = String((a && a.format) || S.ext || 'odt');
+      const out = '/tmp/out/' + S.name.replace(/\.[^.]*$/, '') + '.' + fmt.split(':')[0];
+      try { FS.unlink(out); } catch (_) {}
+      const ok = await queue(async () => { await drain(); return withStrs(['file://' + out, fmt, null], (u, f) => dcall(D.saveAs, u, f, 0)); });
+      if (!ok) throw new Error('LibreOffice could not save as ' + fmt);
+      const d = FS.readFile(out);
+      try { FS.unlink(out); } catch (_) {}
+      if (!a || !a.format || a.format === S.ext) await unoJob((M, css) => { css.util.XModifiable.query(model(M)).setModified(false); });
+      return { bytes: d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength), name: S.name };
+    },
+    read(a) {
+      return unoJob((M, css) => {
+        const max = Math.min(Number((a && a.max_chars) || 60000), 200000);
+        let txt;
+        if (S.docType === 0) {
+          let n = 0, t = 0;
+          txt = paragraphs(M, css).items.map((it) => it.table ? '[table ' + (++t) + ']\n' + it.table.map((r) => '  ' + r).join('\n') : '[' + (++n) + '] ' + it.text).join('\n');
+        } else if (S.docType === 1) {
+          const list = a && a.sheet != null ? [pickSheet(M, css, a.sheet)] : sheets(M, css);
+          txt = list.map(({ sheet, name }) => {
+            const cur = sheet.createCursor(), uc = css.sheet.XUsedAreaCursor.query(cur);
+            uc.gotoStartOfUsedArea(false); uc.gotoEndOfUsedArea(true);
+            const ad = css.sheet.XCellRangeAddressable.query(cur).getRangeAddress();
+            const rows = seq(css.sheet.XCellRangeFormula.query(cur).getFormulaArray()).map((r) => seq(r));
+            const col = (c) => { let s = ''; c++; while (c) { const m = (c - 1) % 26; s = String.fromCharCode(65 + m) + s; c = (c - 1 - m) / 26; } return s; };
+            const head = 'Sheet "' + name + '" (' + col(ad.StartColumn) + (ad.StartRow + 1) + ':' + col(ad.EndColumn) + (ad.EndRow + 1) + ')';
+            return head + '\n' + rows.map((r, i) => (ad.StartRow + i + 1) + ': ' + r.map((v) => (v === '' ? '' : JSON.stringify(v))).join(', ')).join('\n');
+          }).join('\n\n');
+        } else {
+          txt = pages(M, css).map((pg, i) => {
+            const sh = css.container.XIndexAccess.query(pg), parts = [];
+            for (let j = 0; j < sh.getCount(); j++) { const a2 = sh.getByIndex(j); const t = css.text.XText.query(a2.get()); if (t) { const s = t.getString(); if (s) parts.push('  - ' + s.replace(/\n/g, ' / ')); } a2.delete(); }
+            return 'Slide ' + (i + 1) + ':\n' + parts.join('\n');
+          }).join('\n');
+        }
+        return txt.length > max ? txt.slice(0, max) + '\n… (' + (txt.length - max) + ' more characters; pass max_chars to read more)' : txt;
+      });
+    },
+    replace(a) {
+      return unoJob((M, css) => {
+        if (!a || !a.find) throw new Error('"find" is required');
+        const targets = S.docType === 1 ? sheets(M, css).map((s) => s.sheet) : S.docType === 0 ? [model(M)] : pages(M, css);
+        let n = 0;
+        for (const t of targets) {
+          const r = css.util.XReplaceable.query(t); if (!r) continue;
+          const d = r.createReplaceDescriptor();
+          d.setSearchString(String(a.find)); d.setReplaceString(String(a.replace == null ? '' : a.replace));
+          const ps = css.beans.XPropertySet.query(d);
+          // presentations' descriptors have no regex property: set options only when asked
+          const opt = (p, v) => { try { ps.setPropertyValue(p, any(M, 'Boolean', v)); } catch (_) { if (v) throw new Error(p + ' is not supported in this kind of document'); } };
+          if (a.regex) opt('SearchRegularExpression', true);
+          if (a.match_case) opt('SearchCaseSensitive', true);
+          n += r.replaceAll(d);
+        }
+        return n;
+      });
+    },
+    insert(a) {
+      return unoJob((M, css) => {
+        if (S.docType !== 0) throw new Error('insert works on text documents; use set_cells for spreadsheets');
+        const text = String((a && a.text) || ''); if (!text) throw new Error('"text" is required');
+        const { xText, items } = paragraphs(M, css);
+        const paras = items.filter((it) => !it.table);
+        let cur, breakFirst = true;
+        const after = a.after_paragraph != null ? Number(a.after_paragraph) : null;
+        if (after === 0 || a.at === 'start') { cur = xText.createTextCursorByRange(xText.getStart()); breakFirst = false; }
+        else if (after != null) { const p = paras[after - 1]; if (!p) throw new Error('there is no paragraph ' + after + ' (the document has ' + paras.length + ')'); cur = xText.createTextCursorByRange(p.range.getEnd()); }
+        else cur = xText.createTextCursorByRange(xText.getEnd());
+        const lines = text.split(/\r?\n/);
+        lines.forEach((line, i) => {
+          if (i > 0 || breakFirst) xText.insertControlCharacter(cur, 0 /* PARAGRAPH_BREAK */, false);
+          if (line) xText.insertString(cur, line, false);
+        });
+        if (!breakFirst) xText.insertControlCharacter(cur, 0, false);
+        return lines.length;
+      });
+    },
+    set_cells(a) {
+      return unoJob((M, css) => {
+        if (S.docType !== 1) throw new Error('set_cells works on spreadsheets');
+        const cells = (a && a.cells) || {};
+        const { sheet, name } = pickSheet(M, css, a && a.sheet);
+        let n = 0;
+        for (const [addr, v] of Object.entries(cells)) {
+          if (!/^[A-Za-z]{1,3}[0-9]{1,7}$/.test(addr)) throw new Error('bad cell address ' + JSON.stringify(addr) + ' (use A1 style)');
+          const c = css.table.XCell.query(sheet.getCellRangeByName(addr.toUpperCase()));
+          c.setFormula(v == null ? '' : String(v)); n++;
+        }
+        return { sheet: name, cells: n };
+      });
+    },
+    async command(a) {
+      const cmd = String((a && a.uno) || '');
+      if (!/^\.uno:[A-Za-z]+$/.test(cmd)) throw new Error('"uno" must be a command like ".uno:Bold"');
+      await queue(drain);
+      if (a.select == null || a.select === '') { await uno(cmd, a.args || null); return 'applied ' + cmd + ' at the user\'s cursor/selection'; }
+      const target = String(a.select);
+      const raw = async (c, args) => { await withStrs([c, args ? JSON.stringify(args) : ''], (cp, ap) => dcall(D.postUnoCommand, cp, ap, 0)); posted(); };
+      await queue(async () => {
+        await dcall(D.setView, S.aiView);
+        try {
+          if (S.docType === 1) { await raw('.uno:GoToCell', { ToPoint: { type: 'string', value: target } }); await drain(); }
+          else {
+            if (S.docType === 0) await raw('.uno:GoToStartOfDoc');
+            await raw('.uno:ExecuteSearch', { 'SearchItem.SearchString': { type: 'string', value: target }, 'SearchItem.Backward': { type: 'boolean', value: false }, 'SearchItem.Command': { type: 'long', value: 0 } });
+            await drain();   // the search is applied by the main loop
+            const used = W._malloc(4); HEAPU32[used >> 2] = 0;
+            let sel = '';
+            try { const sp = await withStrs(['text/plain;charset=utf-8'], (m) => dcall(D.getTextSelection, m, used)); sel = sp ? UTF8ToString(sp) : ''; if (sp) W._free(sp); const um = HEAPU32[used >> 2]; if (um) W._free(um); }
+            finally { W._free(used); }
+            if (!sel) throw new Error(JSON.stringify(target) + ' was not found in the document');
+          }
+          await raw(cmd, a.args || null);
+        } finally { await dcall(D.setView, S.userView); }
+      });
+      return 'applied ' + cmd + ' to ' + JSON.stringify(target) + ' (with the agent\'s own cursor; the user\'s is untouched)';
+    },
+  };
+
+  // ---- parent protocol ----------------------------------------------------------------
+  let docId = null;
+  function fail(msg) { $('msg').hidden = false; $('msg').textContent = msg; status(''); post({ type: 'lok-failed', docId, error: msg }); }
+  // One engine serves one document at a time; the page reuses it for the next one
+  // (lok-open again, or lok-close when the viewer lets go of it).
+  async function closeDoc() {
+    if (!doc) return;
+    const d0 = doc;
+    await queue(async () => { await dcall(1 /* destroy */); });
+    if (doc === d0) { doc = 0; dcls = 0; }
+    try { FS.unlink('/tmp/in/' + S.name); } catch (_) {}
+    Object.assign(S, { docType: -1, parts: 1, part: 0, size: [0, 0], zoom: 1, modified: false, ext: '', name: '', userView: 0, aiView: -1 });
+    Object.assign(ov, { cursor: null, sel: [], cell: null, gsel: null, ai: { cursor: null, visible: true, sel: [], cell: null } });
+    $('fbar').hidden = true; ['corner', 'colhdr', 'rowhdr'].forEach((id) => { $(id).hidden = true; });
+    overlay.innerHTML = ''; canvas.width = 1; canvas.height = 1;
+    $('part').hidden = true; ['bold', 'italic', 'underline'].forEach((id) => $(id).classList.remove('on'));
+    $('msg').hidden = false; $('msg').textContent = '';
+  }
+  let booted = null, current = null;
+  window.addEventListener('message', async (e) => {
+    const d = e.data; if (!d || e.source !== parent) return;
+    if (d.type === 'lok-open') {
+      const prev = current;
+      current = (async () => {
+        try { await prev; } catch (_) {}
+        docId = d.docId;
+        try {
+          if (!booted) booted = boot();
+          await booted;
+          await closeDoc();
+          const r = await openDoc(String(d.name || 'document'), d.bytes);
+          post(Object.assign({ type: 'lok-opened', docId: d.docId }, r));
+        } catch (err) { fail(String((err && err.message) || err)); throw err; }
+      })();
+      return;
+    }
+    if (d.type === 'lok-close') {
+      const prev = current;
+      current = (async () => { try { await prev; } catch (_) {} await closeDoc(); docId = null; })();
+      return;
+    }
+    if (d.type === 'lok-call') {
+      try {
+        if (!current) throw new Error('no document is open');
+        await current;
+        if (!doc) throw new Error('no document is open');
+        const f = ops[d.op]; if (!f) throw new Error('unknown operation ' + d.op);
+        const v = await f(d.args || {});
+        if (v && v.bytes) post({ type: 'lok-reply', id: d.id, ok: true, value: { name: v.name }, bytes: v.bytes }, [v.bytes]);
+        else post({ type: 'lok-reply', id: d.id, ok: true, value: v });
+        if (d.op !== 'save' && d.op !== 'read') schedulePaint();
+      } catch (err) { post({ type: 'lok-reply', id: d.id, ok: false, error: String((err && err.message) || err) }); }
+    }
+  });
+  // test hooks
+  window.__lok = { state: S, ov, ops, key, uno, paint, selectionText };
+  post({ type: 'lok-ready' });
+  const s = document.createElement('script');
+  s.src = BIN + 'soffice.js?v=' + V;
+  s.onerror = () => fail('could not load LibreOffice');
+  document.body.appendChild(s);
+})();
+</script>
+</body>
+</html>

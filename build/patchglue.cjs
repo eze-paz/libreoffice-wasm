@@ -11,7 +11,7 @@ rep('function getWasmImports(){assignWasmImports();return{env:wasmImports,wasi_s
 rep('var result=getWasmTableEntry(ptr)(arg);checkStackCookie();function finish(result){if(keepRuntimeAlive()){EXITSTATUS=result}else{__emscripten_thread_exit(result)}}finish(result)',
     'function finish(result){if(keepRuntimeAlive()){EXITSTATUS=result}else{__emscripten_thread_exit(result)}}' +
     'WebAssembly.promising(getWasmTableEntry(ptr))(arg).then(r=>{checkStackCookie();finish(r)},e=>{if(e!="unwind"){err("coop: thread entry threw: "+(e&&e.stack||e))}})');
-rep('wasmModuleReceived=module=>{var instance=new WebAssembly.Instance(module,getWasmImports());resolve(receiveInstance(instance,module))}', 'wasmModuleReceived=module=>{WebAssembly.instantiate(module,getWasmImports()).then(instance=>resolve(receiveInstance(instance,module)),e=>{err("coop: pthread instantiate failed: "+e)})}');  // >8MB sync Instance is refused on a window thread
+rep('wasmModuleReceived=module=>{var instance=new WebAssembly.Instance(module,getWasmImports());resolve(receiveInstance(instance,module))}', 'wasmModuleReceived=module=>{WebAssembly.instantiate(module,getWasmImports()).then(instance=>{var __r=receiveInstance(instance,module);try{var __h=self.__coopMain&&self.__coopMain.__coopOnInstance;if(__h)__h(self)}catch(__e){err("coop: instance hook threw: "+__e)}resolve(__r)},e=>{err("coop: pthread instantiate failed: "+e)})}');  // >8MB sync Instance is refused on a window thread
 // 3. A pthread's proxied JS call (every FS syscall, EM_ASM on main) used to go through
 //    wasm (_emscripten_run_on_main_thread_js) and WAIT for the main thread -- a wait
 //    reached through a JS frame, which JSPI cannot suspend ("trying to suspend JS frames").
@@ -24,6 +24,12 @@ rep('function abort(what){', 'function abort(what){try{var __m=self.__coopMain||
 //    was not suspendable -> SuspendError -> std::terminate. Run each iteration as a
 //    promising entry and skip ticks while one is paused, so iterations never overlap.
 rep('var _emscripten_set_main_loop_arg=(func,arg,fps,simulateInfiniteLoop)=>{var iterFunc=()=>getWasmTableEntry(func)(arg);',
-    'var _emscripten_set_main_loop_arg=(func,arg,fps,simulateInfiniteLoop)=>{var __it=WebAssembly.promising(getWasmTableEntry(func)),__busy=false;var iterFunc=()=>{if(__busy)return;__busy=true;__it(arg).then(()=>{__busy=false},e=>{__busy=false;if(e!="unwind"){err("coop: main loop iteration threw: "+(e&&e.stack||e))}})};');
+    'var _emscripten_set_main_loop_arg=(func,arg,fps,simulateInfiniteLoop)=>{var __it=WebAssembly.promising(getWasmTableEntry(func)),__busy=false;var iterFunc=()=>{if(__busy)return;self.__coopLoopBusy=__busy=true;__it(arg).then(()=>{self.__coopLoopBusy=__busy=false},e=>{self.__coopLoopBusy=__busy=false;if(e!="unwind"){err("coop: main loop iteration threw: "+(e&&e.stack||e))}})};');
+// 5. Interactive mode (convert/lo/lok/): LibreOfficeKit calls must run on a pthread (a wait
+//    on the page thread busy-spins). The page takes over the thread callMain() starts --
+//    __coopEntryHook(realm) returning true keeps it for the page's own jobs -- and
+//    __coopOnInstance(realm) runs once each thread's instance is up (it registers the
+//    LOK callback function in every realm's table). Both are no-ops for conversions.
+rep('var invokeEntryPoint=(ptr,arg)=>{', 'var invokeEntryPoint=(ptr,arg)=>{var __h=self.__coopMain&&self.__coopMain.__coopEntryHook;if(__h&&__h(self,ptr,arg))return;');
 fs.writeFileSync(outp, s);
 console.log('patched', outp);

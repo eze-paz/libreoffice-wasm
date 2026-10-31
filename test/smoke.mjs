@@ -65,6 +65,29 @@ for (const mode of [false, true]) {
     if (!ok) fail++;
     console.log(`${ok ? 'PASS' : 'FAIL'} ${c.name} (${((Date.now() - t0) / 1000).toFixed(1)}s)${ok ? '' : ' ' + JSON.stringify(r)}`);
   }
+  // the live editor: open, edit through ops, swap documents in the same engine, save
+  const t0 = Date.now();
+  const r = await page.evaluate(async ({ docx, pptx }) => {
+    const { mountEditor } = await import('./libreoffice.js');
+    const host = document.createElement('div'); host.style.cssText = 'width:900px;height:600px'; document.body.appendChild(host);
+    const bin = (b) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0));
+    try {
+      const ed = mountEditor(host, { name: 'test.docx', bytes: bin(docx) });
+      const a = await ed.ready;
+      await ed.call('insert', { text: 'Added live.', after_paragraph: 1 });
+      const cmd = await ed.call('command', { uno: '.uno:Bold', select: 'Added live.' });
+      const t1 = await ed.call('read');
+      const s1 = await ed.save();
+      const b = await ed.openDocument('deck.pptx', bin(pptx));
+      const n = await ed.call('replace', { find: 'Sandpie slide test', replace: 'Swapped in' });
+      const t2 = await ed.call('read');
+      ed.close();
+      return { a, cmd, t1, s1: s1.bytes.byteLength, b, n, t2 };
+    } catch (e) { return String(e.message || e); }
+  }, { docx: fx('test.docx'), pptx: fx('deck.pptx') });
+  const ok = r && r.a && r.a.docType === 'text' && /\[2\] Added live\./.test(r.t1) && /applied/.test(r.cmd) && r.s1 > 1000 && r.b.docType === 'presentation' && r.n === 1 && /Swapped in/.test(r.t2);
+  if (!ok) fail++;
+  console.log(`${ok ? 'PASS' : 'FAIL'} editor: edit docx, swap to pptx, save (${((Date.now() - t0) / 1000).toFixed(1)}s)${ok ? '' : ' ' + JSON.stringify(r).slice(0, 400)}`);
   await page.close();
 }
 console.log(fail ? `${fail} FAILED` : 'ALL PASS');

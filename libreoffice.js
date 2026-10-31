@@ -28,6 +28,58 @@ export async function convert(files, to, opts = {}) {
   return r.files;
 }
 
+// The live editor (editor.html): the document stays open, people edit it with mouse and keyboard
+// while code edits the same document (ops below).
+//
+//   import { mountEditor } from './libreoffice.js';
+//   const ed = mountEditor(document.getElementById('host'), { name: 'a.docx', bytes });
+//   await ed.ready;                                   // { docType: 'text' | 'spreadsheet' | 'presentation', parts }
+//   await ed.call('insert', { text: 'Hello', after_paragraph: 1 });
+//   const { bytes } = await ed.save();               // the document in its own format
+//
+// ops: read {max_chars?} · replace {find, replace, regex?, match_case?} · insert {text, after_paragraph?|at?}
+//      · set_cells {cells: {A1: 'x', B2: '=SUM(...)'}, sheet?} · command {uno: '.uno:Bold', args?, select?}
+//      (with select, the edit runs on the editor's second, "AI" cursor, shown in orange) · save {format?}
+// One editor per page is plenty: openDocument() swaps documents without a new engine.
+export function mountEditor(el, { name, bytes, version = '1', editor = new URL('./editor.html', import.meta.url).href } = {}) {
+  const frame = document.createElement('iframe');
+  frame.src = editor + (editor.includes('?') ? '&' : '?') + 'v=' + encodeURIComponent(version);
+  frame.setAttribute('allow', 'clipboard-read; clipboard-write');
+  frame.style.cssText = 'width:100%;height:100%;border:0;display:block;';
+  let seq = 0, docId = 0, loadedRes, readyRes, readyRej;
+  const pending = new Map();
+  const loaded = new Promise((r) => { loadedRes = r; });
+  const ed = { frame, modified: false, onModified: null, onSaveRequest: null };
+  const newReady = () => { ed.ready = new Promise((res, rej) => { readyRes = res; readyRej = rej; }); ed.ready.catch(() => {}); };
+  function onMsg(e) {
+    if (e.source !== frame.contentWindow || !e.data) return;
+    const d = e.data;
+    if (d.type === 'lok-ready') return loadedRes();
+    if (d.docId != null && d.docId !== docId) return;
+    if (d.type === 'lok-opened') readyRes({ docType: d.docType, parts: d.parts });
+    else if (d.type === 'lok-failed') readyRej(new Error(d.error));
+    else if (d.type === 'lok-modified') { ed.modified = !!d.modified; if (ed.onModified) ed.onModified(ed.modified); }
+    else if (d.type === 'lok-save-request') { if (ed.onSaveRequest) ed.onSaveRequest(); }
+    else if (d.type === 'lok-reply') { const p = pending.get(d.id); if (p) { pending.delete(d.id); d.ok ? p.res(d) : p.rej(new Error(d.error)); } }
+  }
+  addEventListener('message', onMsg);
+  ed.call = (op, args) => new Promise((res, rej) => {
+    const id = ++seq; pending.set(id, { res: (d) => res(op === 'save' ? { name: d.value.name, bytes: d.bytes } : d.value), rej });
+    loaded.then(() => frame.contentWindow.postMessage({ type: 'lok-call', id, op, args: args || {} }, '*'));
+  });
+  ed.save = (format) => ed.call('save', format ? { format } : {});
+  ed.openDocument = (n, b) => {
+    newReady(); const id = ++docId; const buf = copy(b);
+    loaded.then(() => frame.contentWindow.postMessage({ type: 'lok-open', docId: id, name: n, bytes: buf }, '*', [buf]));
+    return ed.ready;
+  };
+  ed.close = () => { removeEventListener('message', onMsg); for (const p of pending.values()) p.rej(new Error('closed')); pending.clear(); frame.remove(); };
+  newReady();
+  el.appendChild(frame);
+  if (bytes) ed.openDocument(name || 'document', bytes);
+  return ed;
+}
+
 // ArrayBuffer or typed array → a fresh ArrayBuffer to transfer
 const copy = (b) => (b instanceof ArrayBuffer ? b.slice(0) : b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
 

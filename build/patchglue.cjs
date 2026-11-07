@@ -6,8 +6,11 @@ const fs = require('fs');
 const [inp, outp] = process.argv.slice(2);
 let s = fs.readFileSync(inp, 'utf8');
 const rep = (a, b) => { const n = s.split(a).length - 1; if (n !== 1) throw new Error(`expected 1 match, got ${n}: ${a.slice(0, 80)}`); s = s.replace(a, b); };
+//    ... and record the embind registrations a thread makes once it runs (soffice's start
+//    registers every UNO type from its main thread, init_unoembind_uno): that registry is
+//    JS state of the thread's realm, which an engine snapshot (lok/editor.html) replays
 rep('function getWasmImports(){assignWasmImports();return{env:wasmImports,wasi_snapshot_preview1:wasmImports}}',
-    'function getWasmImports(){assignWasmImports();var __c=globalThis.__coop;__c.setMemory(wasmMemory);return{env:wasmImports,wasi_snapshot_preview1:wasmImports,coop:__c}}');
+    'var __coopEmbindLog=null;function getWasmImports(){assignWasmImports();for(const k of Object.keys(wasmImports)){if(!/^_embind_(register|finalize)/.test(k))continue;const f=wasmImports[k];wasmImports[k]=function(...a){if(__coopEmbindLog)__coopEmbindLog.push([k,a]);return f.apply(this,a)}}var __c=globalThis.__coop;__c.setMemory(wasmMemory);return{env:wasmImports,wasi_snapshot_preview1:wasmImports,coop:__c}}');
 rep('var result=getWasmTableEntry(ptr)(arg);checkStackCookie();function finish(result){if(keepRuntimeAlive()){EXITSTATUS=result}else{__emscripten_thread_exit(result)}}finish(result)',
     'function finish(result){if(keepRuntimeAlive()){EXITSTATUS=result}else{__emscripten_thread_exit(result)}}' +
     'WebAssembly.promising(getWasmTableEntry(ptr))(arg).then(r=>{checkStackCookie();finish(r)},e=>{if(e!="unwind"){err("coop: thread entry threw: "+(e&&e.stack||e))}})');
@@ -24,12 +27,13 @@ rep('function abort(what){', 'function abort(what){try{var __m=self.__coopMain||
 //    was not suspendable -> SuspendError -> std::terminate. Run each iteration as a
 //    promising entry and skip ticks while one is paused, so iterations never overlap.
 rep('var _emscripten_set_main_loop_arg=(func,arg,fps,simulateInfiniteLoop)=>{var iterFunc=()=>getWasmTableEntry(func)(arg);',
-    'var _emscripten_set_main_loop_arg=(func,arg,fps,simulateInfiniteLoop)=>{var __it=WebAssembly.promising(getWasmTableEntry(func)),__busy=false;var iterFunc=()=>{if(__busy)return;self.__coopLoopBusy=__busy=true;__it(arg).then(()=>{self.__coopLoopBusy=__busy=false},e=>{self.__coopLoopBusy=__busy=false;if(e!="unwind"){err("coop: main loop iteration threw: "+(e&&e.stack||e))}})};');
+    'var _emscripten_set_main_loop_arg=(func,arg,fps,simulateInfiniteLoop)=>{self.__coopLoopArgs=[func,arg,fps];var __it=WebAssembly.promising(getWasmTableEntry(func)),__busy=false;var iterFunc=()=>{if(__busy)return;self.__coopLoopBusy=__busy=true;__it(arg).then(()=>{self.__coopLoopBusy=__busy=false},e=>{self.__coopLoopBusy=__busy=false;if(e!="unwind"){err("coop: main loop iteration threw: "+(e&&e.stack||e))}})};');
 // 5. Interactive mode (convert/lo/lok/): LibreOfficeKit calls must run on a pthread (a wait
 //    on the page thread busy-spins). The page takes over the thread callMain() starts --
 //    __coopEntryHook(realm) returning true keeps it for the page's own jobs -- and
 //    __coopOnInstance(realm) runs once each thread's instance is up (it registers the
 //    LOK callback function in every realm's table). Both are no-ops for conversions.
-rep('var invokeEntryPoint=(ptr,arg)=>{', 'var invokeEntryPoint=(ptr,arg)=>{var __h=self.__coopMain&&self.__coopMain.__coopEntryHook;if(__h&&__h(self,ptr,arg))return;');
+//    __coopLoopArgs (4.) and __coopEmbindLog (1.) are what a snapshot needs of a thread.
+rep('var invokeEntryPoint=(ptr,arg)=>{', 'var invokeEntryPoint=(ptr,arg)=>{__coopEmbindLog=[];self.__coopEntry=[ptr,arg];var __h=self.__coopMain&&self.__coopMain.__coopEntryHook;if(__h&&__h(self,ptr,arg))return;');
 fs.writeFileSync(outp, s);
 console.log('patched', outp);

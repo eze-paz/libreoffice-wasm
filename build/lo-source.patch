@@ -28,10 +28,10 @@ index 17bc0ba3f..d9ddbbc55 100644
  
  ifeq ($(ENABLE_EMSCRIPTEN_JSPI),TRUE)
 diff --git a/vcl/headless/svpinst.cxx b/vcl/headless/svpinst.cxx
-index 04b0c7fba..33f0e3899 100644
+index 04b0c7fba..b642f479f 100644
 --- a/vcl/headless/svpinst.cxx
 +++ b/vcl/headless/svpinst.cxx
-@@ -302,7 +302,10 @@ void SvpSalInstance::ProcessEvent( SalUserEvent aEvent )
+@@ -302,7 +302,14 @@ void SvpSalInstance::ProcessEvent( SalUserEvent aEvent )
  
  static void loop(void * arg) {
      SolarMutexGuard g;
@@ -40,6 +40,10 @@ index 04b0c7fba..33f0e3899 100644
 +    // iteration, so a client knows that two finished iterations after posting means it all landed
 +    const bool bLok = comphelper::LibreOfficeKit::isActive();
 +    static_cast<SvpSalInstance *>(arg)->ImplYield(bLok, bLok);
++    // Back in the main loop, as Application::Execute() signals after each Yield: a thread
++    // waiting in Scheduler::IdlesLockGuard (Writer deleting a frame format, e.g. while a docx
++    // with pictures loads on the LibreOfficeKit thread) waits for exactly this.
++    ImplGetSVData()->m_inExecuteCondtion.set();
  }
  
  bool SvpSalInstance::DoExecute() {

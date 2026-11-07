@@ -1,0 +1,4 @@
+{
+  "build": 1,
+  "note": "first CI build: sandpie's recipe (BIN_V 6 patches) without --enable-sal-log"
+}

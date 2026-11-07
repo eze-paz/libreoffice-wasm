@@ -1,0 +1,158 @@
+# Builds LibreOffice core for WebAssembly from build/ (autogen.input, lo-source.patch,
+# patches/*.patch) and packs it for the no-isolation engine (build/pack.sh).
+# Runs on a push of build/request.json (or by hand). A full build takes longer than one
+# job may run on a 4-core runner, so `make` is time-boxed and ccache (plus LibreOffice's
+# external tarballs) is saved whatever happens: the next run picks up where this one stopped.
+# A finished build is published as a prerelease "build-<run number>" with the packed files.
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths: ['build/request.json']
+  workflow_dispatch:
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  LO_COMMIT: 7528c0d406012e10c6ce34c3f24bf277302ec695
+  EMSDK_VERSION: 4.0.10
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 8G
+  CCACHE_COMPRESS: '1'
+  CCACHE_COMPRESSLEVEL: '6'
+  TARBALLS: /home/runner/lo-tarballs
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift || true
+          df -h /
+
+      - name: Host packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            autoconf automake bison ccache flex gettext gperf libtool pkg-config nasm cmake ninja-build \
+            libarchive-zip-perl libfont-ttf-perl libxml-parser-perl libxml2-utils xsltproc \
+            libxml2-dev libxslt1-dev libnss3-dev libssl-dev libfontconfig-dev libfreetype-dev \
+            zlib1g-dev uuid-dev libcups2-dev libkrb5-dev libxrandr-dev python3-dev zip unzip brotli
+
+      - name: Request
+        run: cat build/request.json
+
+      - name: emsdk (cache)
+        id: emsdk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}-v1
+
+      - name: emsdk (install)
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk /home/runner/emsdk
+          cd /home/runner/emsdk && ./emsdk install "$EMSDK_VERSION" && ./emsdk activate "$EMSDK_VERSION"
+
+      - name: emsdk (save)
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}-v1
+
+      - name: ccache + tarballs (restore)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /home/runner/.ccache
+            /home/runner/lo-tarballs
+          key: lo-${{ env.LO_COMMIT }}-${{ hashFiles('build/autogen.input') }}-${{ github.run_id }}
+          restore-keys: |
+            lo-${{ env.LO_COMMIT }}-${{ hashFiles('build/autogen.input') }}-
+            lo-${{ env.LO_COMMIT }}-
+
+      - name: LibreOffice source
+        run: |
+          mkdir -p "$TARBALLS" /home/runner/lo && cd /home/runner/lo
+          git init -q && git remote add origin https://github.com/LibreOffice/core.git
+          git fetch -q --depth 1 origin "$LO_COMMIT" && git checkout -q FETCH_HEAD
+          git apply "$GITHUB_WORKSPACE/build/lo-source.patch"
+          for p in "$GITHUB_WORKSPACE"/build/patches/*.patch; do [ -e "$p" ] || continue; echo "apply $p"; git apply "$p"; done
+          git status --short
+
+      - name: Configure
+        run: |
+          source /home/runner/emsdk/emsdk_env.sh
+          cd /home/runner/lo
+          sed "s/^--with-parallelism=.*/--with-parallelism=$(nproc)/" "$GITHUB_WORKSPACE/build/autogen.input" > autogen.input
+          echo "--with-external-tar=$TARBALLS" >> autogen.input
+          cat autogen.input
+          ccache -z
+          ./autogen.sh > autogen.log 2>&1 || { tail -60 autogen.log; exit 1; }
+          tail -5 autogen.log
+
+      - name: Build (time-boxed)
+        id: make
+        run: |
+          source /home/runner/emsdk/emsdk_env.sh
+          cd /home/runner/lo
+          # leave time to save the cache and pack: the job ends at 355 min
+          rc=0; timeout 285m make > make.log 2>&1 || rc=$?
+          tail -40 make.log
+          ccache -s
+          df -h /
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" = 0 ]; then
+            # a stale soffice.js link (build/README.md): make again so it is linked against this data image
+            make >> make.log 2>&1 && echo "done=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ccache + tarballs (save)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /home/runner/.ccache
+            /home/runner/lo-tarballs
+          key: lo-${{ env.LO_COMMIT }}-${{ hashFiles('build/autogen.input') }}-${{ github.run_id }}
+
+      - name: Build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            /home/runner/lo/autogen.log
+            /home/runner/lo/make.log
+          if-no-files-found: ignore
+
+      - name: Pack
+        if: steps.make.outputs.done == '1'
+        run: |
+          cd /home/runner/lo
+          grep -c sdraw instdir/program/soffice.js
+          bash "$GITHUB_WORKSPACE/build/pack.sh" instdir/program /home/runner/out
+          cd /home/runner/out && sha256sum soffice.* > SHA256SUMS && ls -la
+
+      - name: Publish
+        if: steps.make.outputs.done == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd /home/runner/out
+          gh release create "build-${{ github.run_number }}" --prerelease --target "$GITHUB_SHA" \
+            --title "build ${{ github.run_number }}" --notes-file "$GITHUB_WORKSPACE/build/request.json" \
+            soffice.js.gz soffice.wasm.gz soffice.data.gz soffice.data.js.metadata.gz SHA256SUMS

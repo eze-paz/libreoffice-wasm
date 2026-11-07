@@ -147,12 +147,20 @@ jobs:
           bash "$GITHUB_WORKSPACE/build/pack.sh" instdir/program /home/runner/out
           cd /home/runner/out && sha256sum soffice.* > SHA256SUMS && ls -la
 
+      - name: Packed files
+        if: steps.make.outputs.done == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packed
+          path: /home/runner/out
+          compression-level: 0
+
       - name: Publish
         if: steps.make.outputs.done == '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd /home/runner/out
-          gh release create "build-${{ github.run_number }}" --prerelease --target "$GITHUB_SHA" \
+          gh release create "build-${{ github.run_number }}" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
             --title "build ${{ github.run_number }}" --notes-file "$GITHUB_WORKSPACE/build/request.json" \
             soffice.js.gz soffice.wasm.gz soffice.data.gz soffice.data.js.metadata.gz SHA256SUMS

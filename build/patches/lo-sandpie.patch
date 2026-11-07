@@ -1,0 +1,83 @@
+--- a/sw/source/core/graphic/ndgrf.cxx
++++ b/sw/source/core/graphic/ndgrf.cxx
+@@ -29,6 +29,7 @@
+ #include <svl/fstathelper.hxx>
+ #include <vcl/imap.hxx>
+ #include <vcl/vectorgraphicdata.hxx>
++#include <vcl/gfxlink.hxx>
+ #include <sfx2/docfile.hxx>
+ #include <sfx2/linkmgr.hxx>
+ #include <docsh.hxx>
+@@ -314,7 +315,25 @@
+     OUString aName;
+     OUString aTitle;
+     OUString aDesc;
+-    auto const & rVectorGraphicDataPtr = GetGrf().getVectorGraphicData();
++    // A raster picture (PNG, JPEG, ...) has no vector data, and asking for it decodes the
++    // picture right away (swap-in): every picture of a document was decoded during import,
++    // painted or not. Only vector formats can carry a title/description here.
++    bool bRaster = false;
++    if (GetGrf().IsGfxLink())
++    {
++        switch (GetGrf().GetGfxLink().GetType())
++        {
++            case GfxLinkType::NativeGif: case GfxLinkType::NativeJpg: case GfxLinkType::NativePng:
++            case GfxLinkType::NativeTif: case GfxLinkType::NativeBmp: case GfxLinkType::NativeWebp:
++            case GfxLinkType::NativeJxl:
++                bRaster = true;
++                break;
++            default:
++                break;
++        }
++    }
++    static const std::shared_ptr<VectorGraphicData> aNoVectorData;
++    auto const & rVectorGraphicDataPtr = bRaster ? aNoVectorData : GetGrf().getVectorGraphicData();
+ 
+     if (rVectorGraphicDataPtr)
+     {
+--- a/vcl/headless/CairoCommon.cxx
++++ b/vcl/headless/CairoCommon.cxx
+@@ -2061,9 +2061,11 @@
+         return pSurface;
+     }
+ 
+-    // go up one scale again - look for no change
+-    nW = (1 == nWFactor) ? nTargetWidth : nW * 2;
+-    nH = (1 == nHFactor) ? nTargetHeight : nH * 2;
++    // sandpie: cache the exact target size. With a power-of-two copy every paint still had to
++    // scale it (up to 2x) with CAIRO_FILTER_GOOD -- pixman's separable convolution, most of the
++    // CPU of a repaint (typing) in documents with pictures. The exact size paints 1:1.
++    nW = nTargetWidth;
++    nH = nTargetHeight;
+ 
+     // check if we have a downscaled version of required size
+     // bail out if the multiplication for the key would overflow
+@@ -2099,7 +2101,12 @@
+     // them handled correctly
+     cairo_surface_set_device_scale(pSurfaceTarget, fScaleX, fScaleY);
+ 
+-    // add entry to cached entries
++    // add entry to cached entries; exact sizes vary with the zoom, so keep only a few
++    if (maDownscaled.size() >= 4)
++    {
++        cairo_surface_destroy(maDownscaled.begin()->second);
++        maDownscaled.erase(maDownscaled.begin());
++    }
+     maDownscaled[key] = pSurfaceTarget;
+ 
+     return pSurfaceTarget;
+--- a/desktop/source/app/appinit.cxx
++++ b/desktop/source/app/appinit.cxx
+@@ -86,7 +86,11 @@
+ #endif
+     comphelper::setProcessServiceFactory(sm);
+ #if defined __EMSCRIPTEN__
+-    initJsUnoScripting();
++    // sandpie: the pages that never script soffice's main thread (the converter; the editor,
++    // which scripts the LibreOfficeKit thread, set up again by lo_initialize) set this and
++    // skip registering ~28k UNO types in one more thread
++    if (!getenv("SANDPIE_NO_MAIN_JSUNO"))
++        initJsUnoScripting();
+ #endif
+ }
+ 

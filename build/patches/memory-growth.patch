@@ -1,0 +1,14 @@
+--- a/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
++++ b/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
+@@ -14,8 +14,9 @@
+ gb_EMSCRIPTEN_CPPFLAGS := -pthread -s USE_PTHREADS=1 -D_LARGEFILE64_SOURCE -D_LARGEFILE_SOURCE -s SUPPORT_LONGJMP=wasm
+ gb_EMSCRIPTEN_LDFLAGS := $(gb_EMSCRIPTEN_CPPFLAGS)
+ 
+-# Initial memory size
+-gb_EMSCRIPTEN_LDFLAGS += -s TOTAL_MEMORY=1GB
++# Memory: start small and grow on demand (sandpie: an idle engine stays warm; a fixed 1 GB was
++# committed per engine while ~300 MB was used; big documents reach ~550 MB)
++gb_EMSCRIPTEN_LDFLAGS += -s INITIAL_MEMORY=256MB -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=2GB
+ 
+ ifeq ($(ENABLE_EMSCRIPTEN_PROXY_TO_PTHREAD),)
+ gb_EMSCRIPTEN_LDFLAGS += -sPTHREAD_POOL_SIZE=7

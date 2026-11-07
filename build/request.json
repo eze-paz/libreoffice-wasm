@@ -1,4 +1,4 @@
 {
-  "build": 1,
-  "note": "first CI build: sandpie's recipe (BIN_V 6 patches) without --enable-sal-log"
+  "build": 2,
+  "note": "release build (no sal-log) + patches/lo-sandpie.patch (lazy raster decode, exact-size picture cache, optional main-thread JS UNO) + patches/memory-growth.patch (256 MB growing to 2 GB)"
 }

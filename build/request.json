@@ -1,4 +1,4 @@
 {
-  "build": 5,
-  "note": "patches/lo-flusher.patch (LOK joinThreads stops the BufferedDecompositionFlusher thread) + release-flags.patch now only --emit-symbol-map (EXCEPTION_STACK_TRACES=0 is refused with ASSERTIONS=1; patchglue rewrites the throw instead) + soffice.lazy"
+  "build": 6,
+  "note": "lo-sandpie.patch: SwGrfNode::onGraphicChanged reads the link type with GetSharedGfxLink (GetGfxLink swapped the picture in, so pictures were still decoded during import)"
 }

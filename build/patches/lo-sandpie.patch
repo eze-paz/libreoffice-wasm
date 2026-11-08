@@ -8,7 +8,7 @@
  #include <sfx2/docfile.hxx>
  #include <sfx2/linkmgr.hxx>
  #include <docsh.hxx>
-@@ -314,7 +315,25 @@
+@@ -314,7 +315,26 @@
      OUString aName;
      OUString aTitle;
      OUString aDesc;
@@ -17,9 +17,10 @@
 +    // picture right away (swap-in): every picture of a document was decoded during import,
 +    // painted or not. Only vector formats can carry a title/description here.
 +    bool bRaster = false;
-+    if (GetGrf().IsGfxLink())
++    // GetSharedGfxLink, not GetGfxLink: that one swaps the picture in (decodes it) first
++    if (auto const & pLink = GetGrf().GetSharedGfxLink())
 +    {
-+        switch (GetGrf().GetGfxLink().GetType())
++        switch (pLink->GetType())
 +        {
 +            case GfxLinkType::NativeGif: case GfxLinkType::NativeJpg: case GfxLinkType::NativePng:
 +            case GfxLinkType::NativeTif: case GfxLinkType::NativeBmp: case GfxLinkType::NativeWebp:

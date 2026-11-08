@@ -150,7 +150,7 @@ build/pack.sh ~/lo/instdir/program bin     # coopwait + patchglue + lazydata + .
   also stops the drawing layer's cache flusher thread), `lo-sandpie` (no raster decode during
   Writer import, exact-size picture cache in the headless cairo backend, optional main-thread
   JS UNO), `memory-growth` (256 MB growing to 2 GB instead of a fixed 1 GB), `release-flags`
-  (no JS stack trace per C++ exception, a symbol map).
+  (a symbol map for profiling).
 - `lazydata.cjs` moves the files a headless engine rarely reads out of `soffice.data` into
   `soffice.lazy`, deflated one by one, for pages that inflate each on its first read.
 - Builds also run on GitHub Actions (`.github/workflows/build.yml`, on a push of
@@ -177,7 +177,8 @@ Gotchas:
   the engine decides a job is done when every input has printed its `convert ... ->` or
   `Error:` line and every output file is written and closed.
 - The build still has Emscripten `ASSERTIONS` on (LibreOffice's make files keep it to avoid
-  a heavier link); `release-flags.patch` turns off its costliest part, exception stack traces.
+  a heavier link); `patchglue.cjs` removes its costliest part, a JS stack trace and a
+  demangled message for every C++ throw.
 - Android WebView should work wherever JSPI is enabled, but hasn't been tested yet.
 
 ## License

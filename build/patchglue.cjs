@@ -35,5 +35,10 @@ rep('var _emscripten_set_main_loop_arg=(func,arg,fps,simulateInfiniteLoop)=>{var
 //    LOK callback function in every realm's table). Both are no-ops for conversions.
 //    __coopLoopArgs (4.) and __coopEmbindLog (1.) are what a snapshot needs of a thread.
 rep('var invokeEntryPoint=(ptr,arg)=>{', 'var invokeEntryPoint=(ptr,arg)=>{__coopEmbindLog=[];self.__coopEntry=[ptr,arg];var __h=self.__coopMain&&self.__coopMain.__coopEntryHook;if(__h&&__h(self,ptr,arg))return;');
+// 6. A C++ throw is a plain WebAssembly.Exception. ASSERTIONS=1 (LibreOffice's make files)
+//    forces EXCEPTION_STACK_TRACES, so every throw also captured a JS stack trace and called
+//    back into wasm for a demangled message: ~4.5% of a docx load, which throws often.
+rep('var ___throw_exception_with_stack_trace=ex=>{var e=new WebAssembly.Exception(getCppExceptionTag(),[ex],{traceStack:true});e.message=getExceptionMessage(e);throw e};',
+  'var ___throw_exception_with_stack_trace=ex=>{throw new WebAssembly.Exception(getCppExceptionTag(),[ex])};');
 fs.writeFileSync(outp, s);
 console.log('patched', outp);

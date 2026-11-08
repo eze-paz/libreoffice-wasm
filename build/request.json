@@ -1,4 +1,4 @@
 {
-  "build": 4,
-  "note": "patches/lo-flusher.patch (LOK joinThreads stops the BufferedDecompositionFlusher thread: snapshots after documents with shapes) + patches/release-flags.patch (-sEXCEPTION_STACK_TRACES=0, --emit-symbol-map) + pack.sh lazydata (soffice.lazy)"
+  "build": 5,
+  "note": "patches/lo-flusher.patch (LOK joinThreads stops the BufferedDecompositionFlusher thread) + release-flags.patch now only --emit-symbol-map (EXCEPTION_STACK_TRACES=0 is refused with ASSERTIONS=1; patchglue rewrites the throw instead) + soffice.lazy"
 }

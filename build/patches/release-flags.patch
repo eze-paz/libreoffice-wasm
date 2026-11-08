@@ -1,13 +1,11 @@
 --- a/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
 +++ b/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
-@@ -56,6 +56,10 @@
+@@ -56,6 +56,8 @@
  gb_LinkTarget_CFLAGS += $(gb_EMSCRIPTEN_QTDEFS)
  gb_LinkTarget_CXXFLAGS += $(gb_EMSCRIPTEN_QTDEFS)
  endif
-+# sandpie: no JS stack trace captured for every C++ exception (ASSERTIONS=1 turns it on;
-+# LibreOffice throws often while loading documents), and a function-name map next to the
-+# glue for profiling the stripped release build
-+gb_EMSCRIPTEN_LDFLAGS += -sEXCEPTION_STACK_TRACES=0 --emit-symbol-map
++# sandpie: a function-name map next to the glue, for profiling the stripped release build
++gb_EMSCRIPTEN_LDFLAGS += --emit-symbol-map
  gb_LinkTarget_LDFLAGS += $(gb_EMSCRIPTEN_LDFLAGS) $(gb_EMSCRIPTEN_CPPFLAGS) \
      $(gb_EMSCRIPTEN_EXCEPT) -sEXPORT_EXCEPTION_HANDLING_HELPERS
- 
+

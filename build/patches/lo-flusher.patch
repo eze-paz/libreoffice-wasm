@@ -1,0 +1,144 @@
+diff --git a/desktop/source/lib/init.cxx b/desktop/source/lib/init.cxx
+index 779330b7e..d7bb3f0ed 100644
+--- a/desktop/source/lib/init.cxx
++++ b/desktop/source/lib/init.cxx
+@@ -81,6 +81,7 @@
+ #include <svl/cryptosign.hxx>
+ #include <linguistic/misc.hxx>
+ #include <salhelper/timer.hxx>
++#include <drawinglayer/primitive2d/BufferedDecompositionFlusher.hxx>
+ #include <cppuhelper/bootstrap.hxx>
+ #include <comphelper/random.hxx>
+ #include <comphelper/base64.hxx>
+@@ -3614,6 +3615,9 @@ static int joinThreads(JoinThreads eCategory)
+     if (eCategory == JoinThreads::ALL)
+         salhelper::Timer::joinThread();
+ 
++    // the drawing-layer cache flusher; the next drawing starts it again
++    drawinglayer::primitive2d::BufferedDecompositionFlusher::joinThread();
++
+     return 1;
+ }
+ 
+diff --git a/drawinglayer/source/primitive2d/BufferedDecompositionFlusher.cxx b/drawinglayer/source/primitive2d/BufferedDecompositionFlusher.cxx
+index da3fdc6ae..e81849de6 100644
+--- a/drawinglayer/source/primitive2d/BufferedDecompositionFlusher.cxx
++++ b/drawinglayer/source/primitive2d/BufferedDecompositionFlusher.cxx
+@@ -20,6 +20,8 @@
+ #include <sal/config.h>
+ #include <comphelper/solarmutex.hxx>
+ #include <drawinglayer/primitive2d/BufferedDecompositionFlusher.hxx>
++#include <memory>
++#include <mutex>
+ #include <drawinglayer/primitive2d/BufferedDecompositionGroupPrimitive2D.hxx>
+ #include <drawinglayer/primitive2d/BufferedDecompositionPrimitive2D.hxx>
+ 
+@@ -46,44 +48,72 @@ namespace drawinglayer::primitive2d
+     do not have access to vcl-level API here (like SolarMutexReleaser and vcl::Timer).
+ */
+ 
+-static BufferedDecompositionFlusher* getInstance()
+-{
+-    static std::unique_ptr<BufferedDecompositionFlusher> gaTimer(new BufferedDecompositionFlusher);
+-    return gaTimer.get();
+-}
++// The flusher thread is made on demand and can be stopped for LibreOfficeKit's joinThreads
++// (a process image is saved with no background thread running) and made again by the next
++// update(); shutdown() stops it for good.
++static std::mutex gaInstanceMutex;
++static std::unique_ptr<BufferedDecompositionFlusher> gaInstance;
++static bool gbFinal = false;
+ 
+-// static
+-void BufferedDecompositionFlusher::shutdown()
++// stop and destroy the running flusher outside gaInstanceMutex: while it stops, the thread
++// may release primitives, whose remove() takes gaInstanceMutex
++static void stopFlusher(bool bFinal)
+ {
+-    BufferedDecompositionFlusher* pFlusher = getInstance();
++    std::unique_ptr<BufferedDecompositionFlusher> pFlusher;
++    {
++        std::unique_lock l(gaInstanceMutex);
++        if (bFinal)
++            gbFinal = true;
++        pFlusher = std::move(gaInstance);
++    }
++    if (!pFlusher)
++        return;
+     pFlusher->onTeardown();
+     // We have to wait for the thread to exit, otherwise we might end up with the background thread
+     // trying to process stuff while it has things ripped out underneath it.
+     pFlusher->join();
+ }
+ 
++// static
++void BufferedDecompositionFlusher::shutdown() { stopFlusher(true); }
++
++// static
++void BufferedDecompositionFlusher::joinThread() { stopFlusher(false); }
++
+ // static
+ void BufferedDecompositionFlusher::update(const BufferedDecompositionPrimitive2D* p)
+ {
+-    getInstance()->updateImpl(p);
++    std::unique_lock l(gaInstanceMutex);
++    if (!gaInstance && !gbFinal)
++        gaInstance.reset(new BufferedDecompositionFlusher);
++    if (gaInstance)
++        gaInstance->updateImpl(p);
+ }
+ 
+ // static
+ void BufferedDecompositionFlusher::update(const BufferedDecompositionGroupPrimitive2D* p)
+ {
+-    getInstance()->updateImpl(p);
++    std::unique_lock l(gaInstanceMutex);
++    if (!gaInstance && !gbFinal)
++        gaInstance.reset(new BufferedDecompositionFlusher);
++    if (gaInstance)
++        gaInstance->updateImpl(p);
+ }
+ 
+ // static
+ void BufferedDecompositionFlusher::remove(const BufferedDecompositionPrimitive2D* p)
+ {
+-    getInstance()->removeImpl(p);
++    std::unique_lock l(gaInstanceMutex);
++    if (gaInstance)
++        gaInstance->removeImpl(p);
+ }
+ 
+ // static
+ void BufferedDecompositionFlusher::remove(const BufferedDecompositionGroupPrimitive2D* p)
+ {
+-    getInstance()->removeImpl(p);
++    std::unique_lock l(gaInstanceMutex);
++    if (gaInstance)
++        gaInstance->removeImpl(p);
+ }
+ 
+ BufferedDecompositionFlusher::BufferedDecompositionFlusher() { create(); }
+diff --git a/include/drawinglayer/primitive2d/BufferedDecompositionFlusher.hxx b/include/drawinglayer/primitive2d/BufferedDecompositionFlusher.hxx
+index e9898f174..bafe79c9c 100644
+--- a/include/drawinglayer/primitive2d/BufferedDecompositionFlusher.hxx
++++ b/include/drawinglayer/primitive2d/BufferedDecompositionFlusher.hxx
+@@ -47,6 +47,8 @@ public:
+     BufferedDecompositionFlusher();
+ 
+     static DRAWINGLAYERCORE_DLLPUBLIC void shutdown();
++    /// stop the thread until the next update() (LibreOfficeKit joinThreads)
++    static DRAWINGLAYERCORE_DLLPUBLIC void joinThread();
+ 
+     /// Only called by FlusherDeinit
+     void onTeardown();
+diff --git a/desktop/Library_sofficeapp.mk b/desktop/Library_sofficeapp.mk
+--- a/desktop/Library_sofficeapp.mk
++++ b/desktop/Library_sofficeapp.mk
+@@ -63,6 +63,7 @@ $(eval $(call gb_Library_use_libraries,sofficeapp,\
+     $(if $(ENABLE_BREAKPAD), \
+         crashreport \
+     ) \
+     deploymentmisc \
++    drawinglayercore \
+     editeng \
+     fwk \

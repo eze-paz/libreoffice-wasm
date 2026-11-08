@@ -1,4 +1,4 @@
 {
-  "build": 3,
-  "note": "same as build 2; publish fixed (gh -R, run outside the checkout)"
+  "build": 4,
+  "note": "patches/lo-flusher.patch (LOK joinThreads stops the BufferedDecompositionFlusher thread: snapshots after documents with shapes) + patches/release-flags.patch (-sEXCEPTION_STACK_TRACES=0, --emit-symbol-map) + pack.sh lazydata (soffice.lazy)"
 }

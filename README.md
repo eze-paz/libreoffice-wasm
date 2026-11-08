@@ -133,10 +133,11 @@ The build runs on Linux; WSL Ubuntu 24.04 works. A full build takes about 4 hour
 git clone https://git.libreoffice.org/core ~/lo && git -C ~/lo checkout 7528c0d406012e10c6ce34c3f24bf277302ec695
 git clone https://github.com/emscripten-core/emsdk ~/emsdk && ~/emsdk/emsdk install 4.0.10 && ~/emsdk/emsdk activate 4.0.10
 cp build/autogen.input ~/lo/ && git -C ~/lo apply $PWD/build/lo-source.patch
+for p in build/patches/*.patch; do git -C ~/lo apply $PWD/$p; done
 # On WSL, drop the Windows PATH, or configure thinks it is a Windows build:
 unset WSL_DISTRO_NAME WSLENV; export PATH=$(echo "$PATH" | tr : '\n' | grep -v ^/mnt/ | paste -sd:)
 . ~/emsdk/emsdk_env.sh && cd ~/lo && ./autogen.sh && make
-build/pack.sh ~/lo/instdir/program bin     # coopwait + patchglue + .gz copies
+build/pack.sh ~/lo/instdir/program bin     # coopwait + patchglue + lazydata + .gz copies
 ```
 
 - `autogen.input` is headless (`--disable-gui`) with `--with-wasm-module=calc writer impress`.
@@ -145,6 +146,15 @@ build/pack.sh ~/lo/instdir/program bin     # coopwait + patchglue + .gz copies
   OpenSSL targets hit it. It also links soffice with `-sALLOW_TABLE_GROWTH` and `addFunction`
   (for the editor's callbacks), and makes the wasm main loop apply every pending posted event
   per iteration in LibreOfficeKit mode (`vcl/headless/svpinst.cxx`).
+- `patches/*.patch` (applied after it, in name order): `lo-flusher` (LibreOfficeKit joinThreads
+  also stops the drawing layer's cache flusher thread), `lo-sandpie` (no raster decode during
+  Writer import, exact-size picture cache in the headless cairo backend, optional main-thread
+  JS UNO), `memory-growth` (256 MB growing to 2 GB instead of a fixed 1 GB), `release-flags`
+  (no JS stack trace per C++ exception, a symbol map).
+- `lazydata.cjs` moves the files a headless engine rarely reads out of `soffice.data` into
+  `soffice.lazy`, deflated one by one, for pages that inflate each on its first read.
+- Builds also run on GitHub Actions (`.github/workflows/build.yml`, on a push of
+  `build/request.json`), published as prereleases `build-<n>`.
 - Host packages configure asks for include gperf, flex, bison, nasm, libarchive-zip-perl,
   libfont-ttf-perl and libxml-parser-perl.
 
@@ -166,8 +176,8 @@ Gotchas:
 - soffice never exits in WebAssembly, because its event loop keeps the runtime alive. So
   the engine decides a job is done when every input has printed its `convert ... ->` or
   `Error:` line and every output file is written and closed.
-- The build still has Emscripten `ASSERTIONS` on; a release build would be somewhat smaller
-  and faster.
+- The build still has Emscripten `ASSERTIONS` on (LibreOffice's make files keep it to avoid
+  a heavier link); `release-flags.patch` turns off its costliest part, exception stack traces.
 - Android WebView should work wherever JSPI is enabled, but hasn't been tested yet.
 
 ## License
@@ -175,7 +185,7 @@ Gotchas:
 - **The code in this repository** (`coop.js`, `engine.html`, `libreoffice.js`, `index.html`,
   `build/*.cjs`, `pack.sh`, tests) is MIT; see `LICENSE`.
 - **The binaries** are LibreOffice. They are built unmodified from the commit and options
-  above, apart from `build/lo-source.patch` and the post-link rewrites in
+  above, apart from `build/lo-source.patch`, `build/patches/*.patch` and the post-link rewrites in
   `build/coopwait.cjs` and `build/patchglue.cjs`. LibreOffice is under the Mozilla Public
   License 2.0, with third-party components under their own licenses: see
   `licenses/LibreOffice-LICENSE.txt` and `licenses/LibreOffice-NOTICE.txt`. The bundled

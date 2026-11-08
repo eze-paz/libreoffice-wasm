@@ -5,6 +5,7 @@
 #                         mutable globals exported for engine snapshots (exportglobals.cjs)
 #   bin/soffice.data      the instdir file image, unchanged
 #   bin/soffice.data.js.metadata
+#   bin/soffice.lazy      the files a headless engine rarely reads, deflated one by one (lazydata.cjs)
 # plus .gz copies nginx serves with gzip_static (convert/lo/build/README.md).
 #   convert/lo/build/pack.sh ~/lo/instdir/program convert/lo/bin
 set -euo pipefail
@@ -17,6 +18,7 @@ node "$HERE/exportglobals.cjs" "$OUT/soffice.wasm.coop" "$OUT/soffice.wasm"
 rm "$OUT/soffice.wasm.coop"
 node "$HERE/patchglue.cjs" "$SRC/soffice.js" "$OUT/soffice.js"
 cp "$SRC/soffice.data" "$SRC/soffice.data.js.metadata" "$OUT/"
+node "$HERE/lazydata.cjs" "$OUT"
 for f in soffice.js soffice.wasm soffice.data soffice.data.js.metadata; do
   gzip -9 -k -f "$OUT/$f"
 done

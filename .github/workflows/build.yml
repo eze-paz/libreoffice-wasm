@@ -145,6 +145,9 @@ jobs:
           cd /home/runner/lo
           grep -c sdraw instdir/program/soffice.js
           bash "$GITHUB_WORKSPACE/build/pack.sh" instdir/program /home/runner/out
+          # function-name map (release-flags.patch: --emit-symbol-map), for profiling
+          sym=$(find instdir/program workdir/LinkTarget/Executable -maxdepth 1 -name 'soffice*.symbols' 2>/dev/null | head -1)
+          if [ -n "$sym" ]; then gzip -9 -c "$sym" > /home/runner/out/soffice.js.symbols.gz; else echo "no symbol map"; fi
           cd /home/runner/out && sha256sum soffice.* > SHA256SUMS && ls -la
 
       - name: Packed files
@@ -163,4 +166,5 @@ jobs:
           cd /home/runner/out
           gh release create "build-${{ github.run_number }}" -R "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
             --title "build ${{ github.run_number }}" --notes-file "$GITHUB_WORKSPACE/build/request.json" \
-            soffice.js.gz soffice.wasm.gz soffice.data.gz soffice.data.js.metadata.gz SHA256SUMS
+            soffice.js.gz soffice.wasm.gz soffice.data.gz soffice.data.js.metadata.gz soffice.lazy \
+            $(ls soffice.js.symbols.gz 2>/dev/null) SHA256SUMS
